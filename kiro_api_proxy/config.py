@@ -34,6 +34,9 @@ class Settings:
     session_reuse_enabled: bool
     session_ttl_seconds: float
     session_max_entries: int
+    session_max_turns: int
+    session_max_context_chars: int
+    session_compaction_ratio: float
     runtime_enabled: bool
     transport_priority: tuple[str, ...]
 
@@ -73,6 +76,13 @@ class Settings:
             session_reuse_enabled=_bool("SESSION_REUSE_ENABLED", False),
             session_ttl_seconds=float(os.getenv("SESSION_TTL_SECONDS", "1800")),
             session_max_entries=int(os.getenv("SESSION_MAX_ENTRIES", "256")),
+            session_max_turns=int(os.getenv("SESSION_MAX_TURNS", "40")),
+            session_max_context_chars=int(
+                os.getenv("SESSION_MAX_CONTEXT_CHARS", "200000")
+            ),
+            session_compaction_ratio=float(
+                os.getenv("SESSION_COMPACTION_RATIO", "0.7")
+            ),
             runtime_enabled=_bool("RUNTIME_ENABLED", False),
             transport_priority=tuple(
                 item.strip()

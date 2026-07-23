@@ -79,6 +79,11 @@ cp .env.example .env
 - `ACP_QUEUE_SIZE`：有界等待队列，默认 `16`。
 - `SESSION_REUSE_ENABLED`：会话复用，安全默认值为 `false`。
 - `SESSION_TTL_SECONDS` / `SESSION_MAX_ENTRIES`：会话 TTL/LRU 上限。
+- `SESSION_MAX_TURNS`：单个 ACP 上游会话最多复用轮数，默认 `40`。
+- `SESSION_MAX_CONTEXT_CHARS`：ACP 上游会话的估算字符预算，默认
+  `200000`。
+- `SESSION_COMPACTION_RATIO`：当前完整 Prompt 小于上一轮该比例时，
+  视为客户端已压缩上下文并轮换 ACP 会话，默认 `0.7`。
 - `RUNTIME_ENABLED`：直接 Runtime 实验开关，默认且当前必须为 `false`。
 - `TRANSPORT_PRIORITY`：传输优先级，推荐 `acp,cli`。
 
@@ -86,6 +91,11 @@ cp .env.example .env
 `X-Claude-Code-Session-Id`、`X-OpenCode-Session-Id`、`X-Session-Id`、
 `OpenAI-Conversation-Id`。响应通过 `X-Kiro-Session-Id` 和
 `X-Claude-Code-Session-Id` 回传。
+
+代理不自行调用模型生成上下文摘要。OpenCode、Claude Code 等客户端压缩
+消息后，代理检测 Prompt 明显缩短并新建 ACP 会话，以客户端提供的完整
+压缩上下文初始化。达到轮数/字符上限或上游返回 context overflow 时也会
+轮换会话；上下文超限仅在尚未输出内容时自动重试一次。
 
 ## 回滚
 

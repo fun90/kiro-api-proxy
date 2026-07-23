@@ -11,7 +11,9 @@ class SessionRecord:
     key: str
     worker_id: str
     upstream_session_id: str
-    history: list[str] = field(default_factory=list)
+    turn_count: int = 0
+    last_prompt_chars: int = 0
+    upstream_context_chars: int = 0
     last_used: float = field(default_factory=time.monotonic)
     rebuilt: bool = False
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -65,6 +67,8 @@ class SessionStore:
             for record in affected:
                 record.worker_id = ""
                 record.upstream_session_id = ""
+                record.turn_count = 0
+                record.upstream_context_chars = 0
                 record.rebuilt = True
             return affected
 
