@@ -1,0 +1,26 @@
+[project]
+name = "kiro-api-proxy"
+version = "1.1.0"
+description = "通过官方 Kiro CLI 提供 OpenAI 与 Anthropic 兼容 API"
+requires-python = ">=3.11"
+dependencies = [
+  "agent-client-protocol>=0.11,<0.12",
+  "fastapi>=0.115,<1",
+  "uvicorn[standard]>=0.30,<1",
+]
+
+[project.optional-dependencies]
+test = [
+  "anthropic>=0.75,<1",
+  "httpx>=0.27,<1",
+  "openai>=2,<3",
+  "pytest>=8,<9",
+  "pytest-asyncio>=0.24,<1",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.setuptools.packages.find]
+include = ["kiro_api_proxy*"]
