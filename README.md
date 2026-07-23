@@ -66,7 +66,12 @@ cp .env.example .env
 - `DEFAULT_MODEL`：默认 `auto`。
 - `MAX_CONCURRENCY`：默认 `2`。
 - `REQUEST_TIMEOUT_SECONDS`：默认 `900`。
-- `KIRO_WORKING_DIRECTORY`：Kiro 执行目录。
+- `KIRO_WORKING_DIRECTORY`：Kiro 允许执行的根目录。Claude Code
+  请求会通过会话 ID 解析本地 transcript 中的 `cwd`；其他客户端的系统
+  提示中存在 `Working directory` 时也可解析。代理校验目录位于根目录内，
+  再将 ACP 会话或 CLI 回退切换到对应项目。
+- `KIRO_EXTRA_PATH`：额外工具目录列表；Linux/macOS 使用冒号分隔，
+  Windows 使用分号分隔，配置项优先级最高。
 - `KIRO_EFFORT`：可选 reasoning effort。
 - `KIRO_TRUST_TOOLS`：逗号分隔工具名，`*` 表示全部信任；默认不信任工具。
 - `RESPONSE_LANGUAGE`：面向用户内容的语言，默认 `简体中文`。
@@ -86,6 +91,12 @@ cp .env.example .env
   视为客户端已压缩上下文并轮换 ACP 会话，默认 `0.7`。
 - `RUNTIME_ENABLED`：直接 Runtime 实验开关，默认且当前必须为 `false`。
 - `TRANSPORT_PRIORITY`：传输优先级，推荐 `acp,cli`。
+
+Kiro 子进程会按以下顺序构造 `PATH`：`KIRO_EXTRA_PATH`、当前项目的
+`.venv/bin` / `venv/bin` / `node_modules/.bin`、常见用户工具目录
+（`~/.local/bin`、Cargo、npm、pnpm、Bun、Deno、Go），最后保留
+systemd 原始 `PATH`。ACP worker 会绑定项目目录，确保项目级 PATH
+不被其他项目的常驻 worker 环境覆盖。
 
 会话 ID 按以下优先级提取：
 `X-Claude-Code-Session-Id`、`X-OpenCode-Session-Id`、`X-Session-Id`、

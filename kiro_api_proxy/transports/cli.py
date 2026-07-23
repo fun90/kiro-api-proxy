@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import codecs
 import json
-import os
 import re
 from collections.abc import AsyncIterator
 from typing import Any
@@ -15,6 +14,7 @@ from .base import (
     GenerationEvent,
     GenerationRequest,
     TransportError,
+    kiro_environment,
 )
 
 ANSI_ESCAPE = re.compile(
@@ -77,12 +77,13 @@ class CliTransport:
         command.append(request.prompt)
         return command
 
-    def _environment(self) -> dict[str, str]:
-        environment = os.environ.copy()
-        environment.update(
-            {"NO_COLOR": "1", "KIRO_LOG_NO_COLOR": "1", "TERM": "dumb"}
+    def _environment(
+        self, working_directory: str | None = None
+    ) -> dict[str, str]:
+        return kiro_environment(
+            self.settings.extra_path,
+            working_directory or self.settings.working_directory,
         )
-        return environment
 
     async def _spawn(
         self, request: GenerationRequest
@@ -92,8 +93,8 @@ class CliTransport:
                 *self.command_for(request),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                cwd=self.settings.working_directory,
-                env=self._environment(),
+                cwd=request.working_directory or self.settings.working_directory,
+                env=self._environment(request.working_directory),
             )
         except FileNotFoundError as exc:
             raise TransportError(

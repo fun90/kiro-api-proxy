@@ -1,10 +1,20 @@
 from __future__ import annotations
 
 import json
+import re
+from pathlib import Path
 from typing import Any
 
 from .config import settings
 from .schemas import AnthropicRequest, Message, ResponsesRequest
+
+WORKING_DIRECTORY_PATTERN = re.compile(
+    r"(?im)^(?:current\s+)?working directory:\s*([^\r\n<]+)"
+)
+SESSION_ID_PATTERN = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    re.IGNORECASE,
+)
 
 
 def content_text(content: str | list[dict[str, Any]] | None) -> str:
@@ -46,6 +56,54 @@ def messages_to_prompt(messages: list[Message]) -> str:
         + "\n\n".join(sections)
         + "\n\n### 助手\n"
     )
+
+
+def validated_working_directory(raw_path: str) -> str | None:
+    raw_path = raw_path.strip().strip("`'\"")
+    candidate = Path(raw_path).expanduser()
+    if not candidate.is_absolute():
+        return None
+    try:
+        resolved = candidate.resolve(strict=True)
+        allowed_root = Path(settings.working_directory).resolve(strict=True)
+        resolved.relative_to(allowed_root)
+    except (OSError, ValueError):
+        return None
+    return str(resolved) if resolved.is_dir() else None
+
+
+def prompt_working_directory(prompt: str) -> str | None:
+    match = WORKING_DIRECTORY_PATTERN.search(prompt)
+    if match is None:
+        return None
+    return validated_working_directory(match.group(1))
+
+
+def claude_session_working_directory(
+    session_id: str,
+    projects_root: Path | None = None,
+) -> str | None:
+    if not SESSION_ID_PATTERN.fullmatch(session_id):
+        return None
+    root = projects_root or Path.home() / ".claude" / "projects"
+    candidates = sorted(
+        root.glob(f"*/{session_id}.jsonl"),
+        key=lambda item: item.stat().st_mtime_ns,
+        reverse=True,
+    )
+    for candidate in candidates:
+        try:
+            with candidate.open(encoding="utf-8") as handle:
+                for _ in range(10):
+                    line = handle.readline()
+                    if not line:
+                        break
+                    cwd = json.loads(line).get("cwd")
+                    if cwd:
+                        return validated_working_directory(str(cwd))
+        except (OSError, json.JSONDecodeError):
+            continue
+    return None
 
 
 def responses_to_messages(request: ResponsesRequest) -> list[Message]:

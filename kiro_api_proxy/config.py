@@ -20,6 +20,7 @@ class Settings:
     timeout_seconds: float
     max_concurrency: int
     working_directory: str
+    extra_path: tuple[str, ...]
     effort: str
     trust_tools: str
     response_language: str
@@ -57,6 +58,11 @@ class Settings:
             max_concurrency=int(os.getenv("MAX_CONCURRENCY", "2")),
             working_directory=os.getenv(
                 "KIRO_WORKING_DIRECTORY", str(Path.cwd())
+            ),
+            extra_path=tuple(
+                item.strip()
+                for item in os.getenv("KIRO_EXTRA_PATH", "").split(os.pathsep)
+                if item.strip()
             ),
             effort=os.getenv("KIRO_EFFORT", ""),
             trust_tools=os.getenv("KIRO_TRUST_TOOLS", ""),

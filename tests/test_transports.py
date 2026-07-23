@@ -107,6 +107,8 @@ def _acp_settings(**overrides):
         "session_max_turns": 40,
         "session_max_context_chars": 200000,
         "session_compaction_ratio": 0.7,
+        "working_directory": "/workspace",
+        "extra_path": (),
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -120,23 +122,27 @@ class FakeAcpWorker:
         worker_id="worker",
         model="auto",
         effort="",
+        working_directory="/workspace",
     ):
         self.id = worker_id
         self.model = model
         self.effort = effort
+        self.working_directory = working_directory
         self.healthy = True
         self.active = 0
         self.lock = asyncio.Lock()
         self.responses = list(responses)
         self.prompts = []
         self.new_sessions = 0
+        self.session_directories = []
         self.closed = False
 
     async def close(self):
         self.closed = True
 
-    async def new_session(self):
+    async def new_session(self, working_directory=None):
         self.new_sessions += 1
+        self.session_directories.append(working_directory)
         return f"new-session-{self.new_sessions}"
 
     async def prompt(self, session_id, prompt):
@@ -173,6 +179,46 @@ async def test_acp_saturation_falls_back_without_leaking_capacity():
     assert not acp._capacity.locked()
 
 
+async def test_acp_replaces_idle_worker_when_project_changes():
+    transport = AcpTransport(
+        _acp_settings(acp_max_workers=1),
+        FakeTransport("models"),
+    )
+    previous = FakeAcpWorker(
+        [],
+        worker_id="project-a",
+        working_directory="/workspace/project-a",
+    )
+    replacement = FakeAcpWorker(
+        [],
+        worker_id="project-b",
+        working_directory="/workspace/project-b",
+    )
+    transport.workers = [previous]
+
+    async def spawn_worker(model, effort, working_directory):
+        assert (model, effort, working_directory) == (
+            "auto",
+            "",
+            "/workspace/project-b",
+        )
+        transport.workers.append(replacement)
+        return replacement
+
+    transport._spawn_worker = spawn_worker
+
+    selected = await transport._select_worker(
+        "auto",
+        "",
+        previous.id,
+        "/workspace/project-b",
+    )
+
+    assert selected is replacement
+    assert previous.closed
+    assert transport.workers == [replacement]
+
+
 async def test_acp_rebalances_busy_preferred_worker():
     transport = AcpTransport(
         _acp_settings(acp_max_workers=2),
@@ -183,6 +229,7 @@ async def test_acp_rebalances_busy_preferred_worker():
         worker_id="busy-opus",
         model="claude-opus-4.8",
         effort="high",
+        working_directory="/workspace/project",
     )
     busy.active = 1
     idle = FakeAcpWorker(
@@ -190,6 +237,7 @@ async def test_acp_rebalances_busy_preferred_worker():
         worker_id="idle-sonnet",
         model="claude-sonnet-5",
         effort="high",
+        working_directory="/workspace/other",
     )
     replacement = FakeAcpWorker(
         [
@@ -201,11 +249,16 @@ async def test_acp_rebalances_busy_preferred_worker():
         worker_id="new-opus",
         model="claude-opus-4.8",
         effort="high",
+        working_directory="/workspace/project",
     )
     transport.workers = [busy, idle]
 
-    async def spawn_worker(model, effort):
-        assert (model, effort) == ("claude-opus-4.8", "high")
+    async def spawn_worker(model, effort, working_directory):
+        assert (model, effort, working_directory) == (
+            "claude-opus-4.8",
+            "high",
+            "/workspace/project",
+        )
         transport.workers.append(replacement)
         return replacement
 
@@ -229,6 +282,7 @@ async def test_acp_rebalances_busy_preferred_worker():
                 prompt,
                 effort="high",
                 session_id=record.key,
+                working_directory="/workspace/project",
             )
         )
     ]
@@ -236,6 +290,7 @@ async def test_acp_rebalances_busy_preferred_worker():
     assert idle.closed
     assert busy.active == 1
     assert replacement.prompts == [("new-session-1", prompt)]
+    assert replacement.session_directories == ["/workspace/project"]
     assert events[0].data["session_rebuild_reason"] == "worker_changed"
     updated = await transport.sessions.get(record.key)
     assert updated.worker_id == replacement.id
