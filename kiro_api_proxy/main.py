@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import hashlib
@@ -19,8 +20,10 @@ from .model_cache import ModelCache
 from .prompts import (
     anthropic_to_messages,
     anthropic_upstream_model,
+    claude_session_working_directory,
     content_text,
     messages_to_prompt,
+    prompt_working_directory,
     responses_to_messages,
 )
 from .schemas import (
@@ -188,7 +191,13 @@ def _generation_request(
     upstream_model, model_effort = resolve_model(model)
     requested_effort = normalize_effort(effort_override)
     effort = model_effort if requested_effort is None else requested_effort
-    return GenerationRequest(upstream_model, prompt, effort, session_id)
+    return GenerationRequest(
+        upstream_model,
+        prompt,
+        effort,
+        session_id,
+        prompt_working_directory(prompt),
+    )
 
 
 def _session_context(request: Request) -> tuple[str, str | None]:
@@ -219,6 +228,19 @@ def _session_context(request: Request) -> tuple[str, str | None]:
 def _set_session_headers(response: Response, external_id: str) -> None:
     response.headers["x-kiro-session-id"] = external_id
     response.headers["x-claude-code-session-id"] = external_id
+
+
+async def _claude_working_directory(session_id: str) -> str | None:
+    for delay in (0.0, 0.1, 0.2, 0.4, 0.8):
+        if delay:
+            await asyncio.sleep(delay)
+        working_directory = await asyncio.to_thread(
+            claude_session_working_directory,
+            session_id,
+        )
+        if working_directory:
+            return working_directory
+    return None
 
 
 def _http_error(exc: TransportError) -> HTTPException:
@@ -404,6 +426,7 @@ async def anthropic_stream(
     message_id: str,
     client_request: Request | None = None,
     session_id: str | None = None,
+    working_directory: str | None = None,
 ) -> AsyncIterator[str]:
     yield anthropic_event(
         "message_start",
@@ -430,9 +453,12 @@ async def anthropic_stream(
         },
     )
     try:
+        prompt = messages_to_prompt(anthropic_to_messages(request))
+        if working_directory:
+            prompt = f"Working directory: {working_directory}\n\n{prompt}"
         async for event in _events(
             anthropic_upstream_model(request),
-            messages_to_prompt(anthropic_to_messages(request)),
+            prompt,
             None,
             client_request,
             session_id,
@@ -801,18 +827,25 @@ async def anthropic_messages(
     request: AnthropicRequest, raw_request: Request, response: Response
 ):
     external_id, session_key = _session_context(raw_request)
+    working_directory = await _claude_working_directory(external_id)
     _set_session_headers(response, external_id)
     message_id = f"msg_{uuid.uuid4().hex}"
     if request.stream:
         return StreamingResponse(
-            anthropic_stream(request, message_id, raw_request, session_key),
+            anthropic_stream(
+                request,
+                message_id,
+                raw_request,
+                session_key,
+                working_directory,
+            ),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
-    call_args = (
-        anthropic_upstream_model(request),
-        messages_to_prompt(anthropic_to_messages(request)),
-    )
+    prompt = messages_to_prompt(anthropic_to_messages(request))
+    if working_directory:
+        prompt = f"Working directory: {working_directory}\n\n{prompt}"
+    call_args = (anthropic_upstream_model(request), prompt)
     content = (
         await call_kiro(*call_args, session_id=session_key)
         if session_key

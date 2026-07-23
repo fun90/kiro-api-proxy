@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import os
 import re
 import time
 import uuid
@@ -20,6 +19,7 @@ from .base import (
     GenerationEvent,
     GenerationRequest,
     TransportError,
+    kiro_environment,
 )
 
 
@@ -90,10 +90,19 @@ class _AcpClient:
 
 
 class AcpWorker:
-    def __init__(self, settings: Settings, model: str, effort: str) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        model: str,
+        effort: str,
+        working_directory: str | None = None,
+    ) -> None:
         self.settings = settings
         self.model = model
         self.effort = effort
+        self.working_directory = (
+            working_directory or settings.working_directory
+        )
         self.id = uuid.uuid4().hex
         self.client = _AcpClient()
         self.agent: Any = None
@@ -119,13 +128,11 @@ class AcpWorker:
             self.client,
             self.settings.kiro_cli,
             *arguments,
-            env={
-                **os.environ,
-                "NO_COLOR": "1",
-                "KIRO_LOG_NO_COLOR": "1",
-                "TERM": "dumb",
-            },
-            cwd=self.settings.working_directory,
+            env=kiro_environment(
+                self.settings.extra_path,
+                self.working_directory,
+            ),
+            cwd=self.working_directory,
         )
         self.agent, self.process = await self._context.__aenter__()
         await asyncio.wait_for(
@@ -153,9 +160,10 @@ class AcpWorker:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._stderr_task
 
-    async def new_session(self) -> str:
+    async def new_session(self, working_directory: str | None = None) -> str:
         result = await self.agent.new_session(
-            self.settings.working_directory, mcp_servers=[]
+            working_directory or self.working_directory,
+            mcp_servers=[],
         )
         return result.session_id
 
@@ -264,8 +272,18 @@ class AcpTransport:
         )
         self.workers.clear()
 
-    async def _spawn_worker(self, model: str, effort: str) -> AcpWorker:
-        worker = AcpWorker(self.settings, model, effort)
+    async def _spawn_worker(
+        self,
+        model: str,
+        effort: str,
+        working_directory: str | None = None,
+    ) -> AcpWorker:
+        worker = AcpWorker(
+            self.settings,
+            model,
+            effort,
+            working_directory,
+        )
         await worker.start()
         self.workers.append(worker)
         return worker
@@ -294,7 +312,11 @@ class AcpTransport:
         model: str,
         effort: str,
         preferred_id: str | None = None,
+        working_directory: str | None = None,
     ) -> AcpWorker:
+        target_directory = (
+            working_directory or self.settings.working_directory
+        )
         async with self._pool_lock:
             if preferred_id:
                 preferred = next(
@@ -305,6 +327,7 @@ class AcpTransport:
                         and worker.healthy
                         and worker.model == model
                         and worker.effort == effort
+                        and worker.working_directory == target_directory
                     ),
                     None,
                 )
@@ -316,6 +339,7 @@ class AcpTransport:
                 if worker.healthy
                 and worker.model == model
                 and worker.effort == effort
+                and worker.working_directory == target_directory
             ]
             idle_matching = [
                 worker for worker in healthy if worker.active == 0
@@ -323,7 +347,11 @@ class AcpTransport:
             if idle_matching:
                 return min(idle_matching, key=lambda worker: worker.active)
             if len(self.workers) < self.settings.acp_max_workers:
-                return await self._spawn_worker(model, effort)
+                return await self._spawn_worker(
+                    model,
+                    effort,
+                    target_directory,
+                )
             # 达到池上限时，用目标模型替换空闲的异模型 worker。关联会话
             # 保留为 orphan，后续请求可用客户端完整 Prompt 自动恢复。
             idle = next(
@@ -331,7 +359,11 @@ class AcpTransport:
                     item
                     for item in self.workers
                     if item.active == 0
-                    and (item.model != model or item.effort != effort)
+                    and (
+                        item.model != model
+                        or item.effort != effort
+                        or item.working_directory != target_directory
+                    )
                 ),
                 None,
             )
@@ -339,7 +371,11 @@ class AcpTransport:
                 self.workers.remove(idle)
                 await self.sessions.orphan_worker(idle.id)
                 await idle.close()
-                return await self._spawn_worker(model, effort)
+                return await self._spawn_worker(
+                    model,
+                    effort,
+                    target_directory,
+                )
             raise TransportError(
                 "ACP worker 池已饱和", ErrorCategory.CAPACITY, True
             )
@@ -392,9 +428,12 @@ class AcpTransport:
         )
 
     async def _rebuild_session(
-        self, record: SessionRecord, worker: AcpWorker
+        self,
+        record: SessionRecord,
+        worker: AcpWorker,
+        working_directory: str | None = None,
     ) -> str:
-        upstream_id = await worker.new_session()
+        upstream_id = await worker.new_session(working_directory)
         record.worker_id = worker.id
         record.upstream_session_id = upstream_id
         record.turn_count = 0
@@ -438,6 +477,7 @@ class AcpTransport:
                 request.model,
                 request.effort,
                 record.worker_id if record else None,
+                request.working_directory,
             )
         except BaseException:
             if record_lock is not None:
@@ -449,7 +489,9 @@ class AcpTransport:
             async with worker.lock:
                 rebuild_reason: str | None = None
                 if record is None:
-                    upstream_id = await worker.new_session()
+                    upstream_id = await worker.new_session(
+                        request.working_directory
+                    )
                     if request.session_id and self.settings.session_reuse_enabled:
                         record = SessionRecord(
                             request.session_id, worker.id, upstream_id
@@ -462,7 +504,11 @@ class AcpTransport:
                         record.worker_id != worker.id
                         or not record.upstream_session_id
                     ):
-                        upstream_id = await self._rebuild_session(record, worker)
+                        upstream_id = await self._rebuild_session(
+                            record,
+                            worker,
+                            request.working_directory,
+                        )
                         rebuild_reason = "worker_changed"
                     else:
                         upstream_id = record.upstream_session_id
@@ -473,7 +519,11 @@ class AcpTransport:
                         record, request.prompt, latest_turn
                     )
                     if reason:
-                        upstream_id = await self._rebuild_session(record, worker)
+                        upstream_id = await self._rebuild_session(
+                            record,
+                            worker,
+                            request.working_directory,
+                        )
                         rebuild_reason = reason
 
                 prompt = (
@@ -508,7 +558,9 @@ class AcpTransport:
                             and self._is_context_overflow(event.text)
                         ):
                             upstream_id = await self._rebuild_session(
-                                record, worker
+                                record,
+                                worker,
+                                request.working_directory,
                             )
                             prompt = request.prompt
                             retried_context_overflow = True
