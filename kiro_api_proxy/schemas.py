@@ -20,6 +20,7 @@ class ChatRequest(BaseModel):
     model: str = settings.default_model
     messages: list[Message] = Field(min_length=1)
     stream: bool = False
+    stream_options: dict[str, Any] | None = None
     reasoning_effort: str | None = Field(
         default=None,
         validation_alias=AliasChoices("reasoning_effort", "reasoningEffort"),

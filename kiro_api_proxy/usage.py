@@ -26,6 +26,7 @@ class TokenUsage:
     output_tokens: int = 0
     cache_read_input_tokens: int = 0
     cache_creation_input_tokens: int = 0
+    reasoning_tokens: int = 0
     context_tokens: int = 0
     context_window: int = 0
 
@@ -52,6 +53,13 @@ class TokenUsage:
             "cachedWriteTokens",
             default=self.cache_creation_input_tokens,
         )
+        self.reasoning_tokens = _non_negative(
+            source,
+            "reasoning_tokens",
+            "thought_tokens",
+            "thoughtTokens",
+            default=self.reasoning_tokens,
+        )
         self.context_tokens = _non_negative(
             source,
             "context_tokens",
@@ -64,6 +72,40 @@ class TokenUsage:
             "size",
             default=self.context_window,
         )
+
+    def ensure_estimates(self, prompt: str, output: str) -> None:
+        if self.input_tokens <= 0:
+            self.input_tokens = estimate_tokens(prompt)
+        if self.output_tokens <= 0:
+            self.output_tokens = estimate_tokens(output)
+
+    def chat_completions(self) -> dict[str, Any]:
+        return {
+            "prompt_tokens": self.input_tokens,
+            "completion_tokens": self.output_tokens,
+            "total_tokens": self.input_tokens + self.output_tokens,
+            "prompt_tokens_details": {
+                "cached_tokens": self.cache_read_input_tokens,
+                "cache_write_tokens": self.cache_creation_input_tokens,
+            },
+            "completion_tokens_details": {
+                "reasoning_tokens": self.reasoning_tokens,
+            },
+        }
+
+    def responses(self) -> dict[str, Any]:
+        return {
+            "input_tokens": self.input_tokens,
+            "input_tokens_details": {
+                "cached_tokens": self.cache_read_input_tokens,
+                "cache_write_tokens": self.cache_creation_input_tokens,
+            },
+            "output_tokens": self.output_tokens,
+            "output_tokens_details": {
+                "reasoning_tokens": self.reasoning_tokens,
+            },
+            "total_tokens": self.input_tokens + self.output_tokens,
+        }
 
 
 def _non_negative(

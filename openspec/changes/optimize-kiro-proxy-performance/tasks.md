@@ -25,6 +25,7 @@
 - [x] 3.6 增加中文跨字节分块、流中错误、提前断开和慢客户端测试
 - [x] 3.7 提供临时单块兼容开关并记录迁移说明
 - [x] 3.8 映射 ACP token 用量并为 OpenAI/Anthropic 响应提供统一非零估算兜底
+- [x] 3.9 为 OpenAI Chat Completions 与 Responses 流式事件补充标准 token 用量
 
 ## 4. ACP 常驻运行时
 

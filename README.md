@@ -57,6 +57,9 @@ cp .env.example .env
 - Anthropic 流式响应优先使用 ACP 提供的 token 统计，并在上游未提供时按
   Prompt 与输出文本估算；OpenAI/Anthropic 非流式响应和
   `/v1/messages/count_tokens` 使用相同估算规则，不再固定返回零。
+- OpenAI Chat Completions 在 `stream_options.include_usage=true` 时于
+  `[DONE]` 前返回最终用量 chunk；Responses 流的 `response.completed`
+  也包含输入、输出、缓存、推理和总 token 用量。
 - Kiro 尚未公开直接 Runtime API 契约；项目不逆向私有接口，`RuntimeTransport` 默认关闭并安全降级。
 
 ## 配置

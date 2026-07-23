@@ -66,6 +66,7 @@ def _event_from_prompt_usage(usage: Any) -> GenerationEvent | None:
             "cache_creation_input_tokens": payload.get(
                 "cachedWriteTokens", 0
             ),
+            "reasoning_tokens": payload.get("thoughtTokens", 0),
         },
     )
 

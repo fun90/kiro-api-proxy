@@ -43,3 +43,11 @@
 #### Scenario: 上游提供真实用量
 - **WHEN** ACP 在生成结束时提供输入、输出或缓存 token 统计
 - **THEN** 系统优先采用上游统计，并保留上下文已用量与窗口大小的内部事件
+
+#### Scenario: OpenAI Chat 请求流式用量
+- **WHEN** Chat Completions 流式请求设置 `stream_options.include_usage=true`
+- **THEN** 系统在 `[DONE]` 前发送 `choices` 为空且包含完整 `usage` 的最终 chunk
+
+#### Scenario: OpenAI Responses 返回流式用量
+- **WHEN** Responses API 流式生成成功完成
+- **THEN** `response.completed` 的响应对象包含输入、输出、缓存、推理及总 token 用量

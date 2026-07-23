@@ -374,6 +374,8 @@ def chat_chunk(
     model: str,
     content: str | None = None,
     finish_reason: str | None = None,
+    usage: dict[str, Any] | None = None,
+    usage_only: bool = False,
 ) -> str:
     delta = {"content": content} if content is not None else {}
     payload = {
@@ -381,9 +383,18 @@ def chat_chunk(
         "object": "chat.completion.chunk",
         "created": created,
         "model": model,
-        "choices": [
-            {"index": 0, "delta": delta, "finish_reason": finish_reason}
-        ],
+        "choices": (
+            []
+            if usage_only
+            else [
+                {
+                    "index": 0,
+                    "delta": delta,
+                    "finish_reason": finish_reason,
+                }
+            ]
+        ),
+        "usage": usage,
     }
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
@@ -396,19 +407,34 @@ async def chat_stream(
     reasoning_effort: str | None = None,
     client_request: Request | None = None,
     session_id: str | None = None,
+    include_usage: bool = False,
 ) -> AsyncIterator[str]:
+    usage = TokenUsage(input_tokens=estimate_tokens(prompt))
+    output_parts: list[str] = []
     try:
         async for event in _events(
             model, prompt, reasoning_effort, client_request, session_id
         ):
             if event.type is EventType.TEXT_DELTA:
+                output_parts.append(event.text)
                 yield chat_chunk(completion_id, created, model, event.text)
+            elif event.type is EventType.USAGE:
+                usage.update(event.data)
             elif event.type is EventType.ERROR:
                 error = {"error": {"message": event.text, "type": "api_error"}}
                 yield f"data: {json.dumps(error, ensure_ascii=False)}\n\n"
                 break
         else:
             yield chat_chunk(completion_id, created, model, finish_reason="stop")
+            if include_usage:
+                usage.ensure_estimates(prompt, "".join(output_parts))
+                yield chat_chunk(
+                    completion_id,
+                    created,
+                    model,
+                    usage=usage.chat_completions(),
+                    usage_only=True,
+                )
     except HTTPException as exc:
         error = {"error": {"message": str(exc.detail), "type": "api_error"}}
         yield f"data: {json.dumps(error, ensure_ascii=False)}\n\n"
@@ -523,6 +549,8 @@ async def responses_stream(
     session_id: str | None = None,
 ) -> AsyncIterator[str]:
     response_id = f"resp_{uuid.uuid4().hex}"
+    prompt = messages_to_prompt(responses_to_messages(request))
+    usage = TokenUsage(input_tokens=estimate_tokens(prompt))
 
     def event(name: str, payload: dict[str, Any]) -> str:
         return (
@@ -585,7 +613,7 @@ async def responses_stream(
     text_parts: list[str] = []
     async for item in _events(
         request.model,
-        messages_to_prompt(responses_to_messages(request)),
+        prompt,
         request.reasoning_effort,
         client_request,
         session_id,
@@ -604,6 +632,8 @@ async def responses_stream(
                     "sequence_number": sequence,
                 },
             )
+        elif item.type is EventType.USAGE:
+            usage.update(item.data)
         elif item.type is EventType.ERROR:
             yield event(
                 "response.failed",
@@ -615,6 +645,7 @@ async def responses_stream(
             )
             return
     output_text = "".join(text_parts)
+    usage.ensure_estimates(prompt, output_text)
     yield event(
         "response.output_text.done",
         {
@@ -671,6 +702,7 @@ async def responses_stream(
                 "object": "response",
                 "status": "completed",
                 "model": request.model,
+                "usage": usage.responses(),
             },
         },
     )
@@ -764,6 +796,10 @@ async def chat(request: ChatRequest, raw_request: Request, response: Response):
                 request.reasoning_effort,
                 raw_request,
                 session_key,
+                bool(
+                    request.stream_options
+                    and request.stream_options.get("include_usage")
+                ),
             ),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},

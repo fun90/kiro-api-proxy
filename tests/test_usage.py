@@ -39,6 +39,7 @@ def test_acp_prompt_usage_is_normalized():
             totalTokens=120,
             cachedReadTokens=80,
             cachedWriteTokens=10,
+            thoughtTokens=5,
         )
     )
     assert event is not None
@@ -48,3 +49,4 @@ def test_acp_prompt_usage_is_normalized():
     assert usage.output_tokens == 20
     assert usage.cache_read_input_tokens == 80
     assert usage.cache_creation_input_tokens == 10
+    assert usage.reasoning_tokens == 5

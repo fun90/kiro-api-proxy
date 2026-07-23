@@ -29,6 +29,43 @@ async def test_chat_stream_is_incremental(monkeypatch):
     assert chunks[-1] == "data: [DONE]\n\n"
 
 
+async def test_chat_stream_includes_requested_usage(monkeypatch):
+    async def usage_events(*args, **kwargs):
+        yield GenerationEvent(EventType.TEXT_DELTA, text="你好")
+        yield GenerationEvent(
+            EventType.USAGE,
+            data={
+                "input_tokens": 12,
+                "output_tokens": 7,
+                "cache_read_input_tokens": 5,
+                "reasoning_tokens": 2,
+            },
+        )
+        yield GenerationEvent(EventType.DONE)
+
+    monkeypatch.setattr(main, "_events", usage_events)
+    chunks = [
+        chunk
+        async for chunk in main.chat_stream(
+            "auto",
+            "提示",
+            "chatcmpl-test",
+            1,
+            include_usage=True,
+        )
+    ]
+    usage_chunk = json.loads(chunks[-2].removeprefix("data: "))
+    assert usage_chunk["choices"] == []
+    assert usage_chunk["usage"]["prompt_tokens"] == 12
+    assert usage_chunk["usage"]["completion_tokens"] == 7
+    assert usage_chunk["usage"]["prompt_tokens_details"][
+        "cached_tokens"
+    ] == 5
+    assert usage_chunk["usage"]["completion_tokens_details"][
+        "reasoning_tokens"
+    ] == 2
+
+
 async def test_anthropic_stream_is_incremental(monkeypatch):
     monkeypatch.setattr(main, "_events", _fake_events)
     request = main.AnthropicRequest(
@@ -81,6 +118,9 @@ async def test_responses_stream_is_incremental(monkeypatch):
     assert any("response.created" in chunk for chunk in chunks)
     assert sum("response.output_text.delta" in chunk for chunk in chunks) == 2
     assert any("response.completed" in chunk for chunk in chunks)
+    completed = json.loads(chunks[-2].split("data: ", 1)[1])
+    assert completed["response"]["usage"]["input_tokens"] > 0
+    assert completed["response"]["usage"]["output_tokens"] > 0
 
 
 async def test_stream_error_is_encoded(monkeypatch):
