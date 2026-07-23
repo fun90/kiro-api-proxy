@@ -40,11 +40,34 @@ def _event_from_update(update: Any) -> GenerationEvent | None:
             data=update.model_dump(mode="json", by_alias=True, exclude_none=True),
         )
     if kind == "usage_update":
+        payload = update.model_dump(
+            mode="json", by_alias=True, exclude_none=True
+        )
         return GenerationEvent(
             EventType.USAGE,
-            data=update.model_dump(mode="json", by_alias=True, exclude_none=True),
+            data={
+                "context_tokens": payload.get("used", 0),
+                "context_window": payload.get("size", 0),
+            },
         )
     return None
+
+
+def _event_from_prompt_usage(usage: Any) -> GenerationEvent | None:
+    if usage is None:
+        return None
+    payload = usage.model_dump(mode="json", by_alias=True, exclude_none=True)
+    return GenerationEvent(
+        EventType.USAGE,
+        data={
+            "input_tokens": payload.get("inputTokens", 0),
+            "output_tokens": payload.get("outputTokens", 0),
+            "cache_read_input_tokens": payload.get("cachedReadTokens", 0),
+            "cache_creation_input_tokens": payload.get(
+                "cachedWriteTokens", 0
+            ),
+        },
+    )
 
 
 class _AcpClient:
@@ -176,6 +199,11 @@ class AcpWorker:
         async def execute() -> None:
             try:
                 result = await self.agent.prompt(session_id, [text_block(prompt)])
+                usage_event = _event_from_prompt_usage(
+                    getattr(result, "usage", None)
+                )
+                if usage_event is not None:
+                    await queue.put(usage_event)
                 await queue.put(
                     GenerationEvent(
                         EventType.DONE,

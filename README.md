@@ -54,7 +54,9 @@ cp .env.example .env
 
 - 暂不转换 OpenAI `tools`/`tool_calls`；可通过 `KIRO_TRUST_TOOLS` 控制 Kiro 自身工具。
 - Claude API 支持文本消息、system、Thinking 映射及 SSE；工具块会作为文本上下文传给 Kiro，不返回原生 `tool_use`。
-- Kiro CLI 不公开 token 统计，因此 usage 返回零。
+- Anthropic 流式响应优先使用 ACP 提供的 token 统计，并在上游未提供时按
+  Prompt 与输出文本估算；OpenAI/Anthropic 非流式响应和
+  `/v1/messages/count_tokens` 使用相同估算规则，不再固定返回零。
 - Kiro 尚未公开直接 Runtime API 契约；项目不逆向私有接口，`RuntimeTransport` 默认关闭并安全降级。
 
 ## 配置

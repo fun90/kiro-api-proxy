@@ -31,3 +31,15 @@
 #### Scenario: 首个事件后上游失败
 - **WHEN** 系统已发送 SSE 响应头和部分内容后上游失败
 - **THEN** 系统发送目标协议允许的错误事件并关闭流
+
+### Requirement: 返回非零且一致的 token 用量
+系统 SHALL 将上游 ACP 用量事件映射为协议用量字段，并在上游未提供完整
+统计时使用统一估算规则填充输入和输出 token，不得固定返回零。
+
+#### Scenario: Claude Code 流式请求
+- **WHEN** Claude Code 通过 Anthropic Messages SSE 完成一次生成
+- **THEN** `message_start` 包含非零输入 token，且 `message_delta` 包含非零输出 token
+
+#### Scenario: 上游提供真实用量
+- **WHEN** ACP 在生成结束时提供输入、输出或缓存 token 统计
+- **THEN** 系统优先采用上游统计，并保留上下文已用量与窗口大小的内部事件

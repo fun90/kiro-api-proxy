@@ -1,4 +1,5 @@
 import asyncio
+import json
 
 from kiro_api_proxy import main
 from kiro_api_proxy.transports import EventType, GenerationEvent
@@ -42,7 +43,33 @@ async def test_anthropic_stream_is_incremental(monkeypatch):
     assert len(deltas) == 2
     assert '"text": "你"' in deltas[0]
     assert '"text": "好"' in deltas[1]
+    start = json.loads(chunks[0].split("data: ", 1)[1])
+    assert start["message"]["usage"]["input_tokens"] > 0
+    delta = json.loads(chunks[-2].split("data: ", 1)[1])
+    assert delta["usage"]["output_tokens"] > 0
     assert "message_stop" in chunks[-1]
+
+
+async def test_anthropic_stream_prefers_upstream_output_usage(monkeypatch):
+    async def usage_events(*args, **kwargs):
+        yield GenerationEvent(EventType.TEXT_DELTA, text="你好")
+        yield GenerationEvent(
+            EventType.USAGE,
+            data={"input_tokens": 12, "output_tokens": 7},
+        )
+        yield GenerationEvent(EventType.DONE)
+
+    monkeypatch.setattr(main, "_events", usage_events)
+    request = main.AnthropicRequest(
+        model="auto",
+        messages=[{"role": "user", "content": "你好"}],
+    )
+    chunks = [
+        chunk
+        async for chunk in main.anthropic_stream(request, "msg_test")
+    ]
+    delta = json.loads(chunks[-2].split("data: ", 1)[1])
+    assert delta["usage"]["output_tokens"] == 7
 
 
 async def test_responses_stream_is_incremental(monkeypatch):
