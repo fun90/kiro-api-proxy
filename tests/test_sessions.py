@@ -24,6 +24,9 @@ async def test_session_expiry_and_worker_orphan(monkeypatch):
     recovered = await store.get("tenant-a:same")
     assert recovered.worker_id == ""
     assert recovered.rebuilt is True
+    assert recovered.turn_count == 0
+    assert recovered.upstream_context_chars == 0
+    assert not hasattr(recovered, "history")
 
     now = 111.0
     assert await store.get("tenant-a:same") is None

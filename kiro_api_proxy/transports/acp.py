@@ -209,6 +209,22 @@ class AcpWorker:
 
 class AcpTransport:
     name = "acp"
+    _CONTEXT_OVERFLOW_MARKERS = (
+        "context window",
+        "context length",
+        "maximum context",
+        "max context",
+        "context limit",
+        "too many tokens",
+        "token limit",
+        "prompt is too long",
+        "prompt too long",
+        "上下文过长",
+        "上下文超限",
+        "超过上下文",
+        "令牌过多",
+        "超过令牌",
+    )
 
     def __init__(self, settings: Settings, model_transport: Any) -> None:
         self.settings = settings
@@ -292,7 +308,7 @@ class AcpTransport:
                     ),
                     None,
                 )
-                if preferred:
+                if preferred and preferred.active == 0:
                     return preferred
             healthy = [
                 worker
@@ -301,27 +317,32 @@ class AcpTransport:
                 and worker.model == model
                 and worker.effort == effort
             ]
-            if not healthy and len(self.workers) < self.settings.acp_max_workers:
+            idle_matching = [
+                worker for worker in healthy if worker.active == 0
+            ]
+            if idle_matching:
+                return min(idle_matching, key=lambda worker: worker.active)
+            if len(self.workers) < self.settings.acp_max_workers:
                 return await self._spawn_worker(model, effort)
-            if not healthy:
-                # 达到池上限且没有相符 worker 时，淘汰一个空闲 worker。
-                idle = next(
-                    (item for item in self.workers if item.active == 0), None
-                )
-                if idle is None:
-                    raise TransportError(
-                        "ACP worker 池已饱和", ErrorCategory.CAPACITY, True
-                    )
+            # 达到池上限时，用目标模型替换空闲的异模型 worker。关联会话
+            # 保留为 orphan，后续请求可用客户端完整 Prompt 自动恢复。
+            idle = next(
+                (
+                    item
+                    for item in self.workers
+                    if item.active == 0
+                    and (item.model != model or item.effort != effort)
+                ),
+                None,
+            )
+            if idle is not None:
                 self.workers.remove(idle)
-                await self.sessions.remove_worker(idle.id)
+                await self.sessions.orphan_worker(idle.id)
                 await idle.close()
                 return await self._spawn_worker(model, effort)
-            if (
-                all(worker.active for worker in healthy)
-                and len(self.workers) < self.settings.acp_max_workers
-            ):
-                return await self._spawn_worker(model, effort)
-            return min(healthy, key=lambda worker: worker.active)
+            raise TransportError(
+                "ACP worker 池已饱和", ErrorCategory.CAPACITY, True
+            )
 
     async def models(self) -> list[dict[str, Any]]:
         return await self.model_transport.models()
@@ -335,9 +356,57 @@ class AcpTransport:
                 raise TransportError(event.text, ErrorCategory.PROTOCOL, True)
         return "".join(chunks).strip()
 
+    def _rotation_reason(
+        self,
+        record: SessionRecord,
+        full_prompt: str,
+        latest_turn: str,
+    ) -> str | None:
+        current_chars = len(full_prompt)
+        ratio = min(1.0, max(0.0, self.settings.session_compaction_ratio))
+        if (
+            record.last_prompt_chars > 0
+            and ratio > 0
+            and current_chars < record.last_prompt_chars * ratio
+        ):
+            return "client_compacted"
+        if (
+            self.settings.session_max_turns > 0
+            and record.turn_count >= self.settings.session_max_turns
+        ):
+            return "max_turns"
+        projected_chars = record.upstream_context_chars + len(latest_turn)
+        if (
+            self.settings.session_max_context_chars > 0
+            and projected_chars > self.settings.session_max_context_chars
+            and current_chars < projected_chars
+        ):
+            return "max_context_chars"
+        return None
+
+    @classmethod
+    def _is_context_overflow(cls, message: str) -> bool:
+        normalized = message.casefold()
+        return any(
+            marker in normalized for marker in cls._CONTEXT_OVERFLOW_MARKERS
+        )
+
+    async def _rebuild_session(
+        self, record: SessionRecord, worker: AcpWorker
+    ) -> str:
+        upstream_id = await worker.new_session()
+        record.worker_id = worker.id
+        record.upstream_session_id = upstream_id
+        record.turn_count = 0
+        record.upstream_context_chars = 0
+        record.rebuilt = True
+        await self.sessions.put(record)
+        return upstream_id
+
     async def stream(
         self, request: GenerationRequest
     ) -> AsyncIterator[GenerationEvent]:
+        record_lock: asyncio.Lock | None = None
         try:
             await asyncio.wait_for(
                 self._capacity.acquire(), timeout=self.settings.timeout_seconds
@@ -346,44 +415,142 @@ class AcpTransport:
             raise TransportError(
                 "ACP 等待队列已满", ErrorCategory.CAPACITY, True
             ) from exc
-        record = (
-            await self.sessions.get(request.session_id)
-            if request.session_id and self.settings.session_reuse_enabled
-            else None
-        )
-        worker = await self._select_worker(
-            request.model,
-            request.effort,
-            record.worker_id if record else None,
-        )
+        try:
+            record = (
+                await self.sessions.get(request.session_id)
+                if request.session_id and self.settings.session_reuse_enabled
+                else None
+            )
+            if record is not None:
+                try:
+                    await asyncio.wait_for(
+                        record.lock.acquire(),
+                        timeout=self.settings.timeout_seconds,
+                    )
+                except TimeoutError as exc:
+                    raise TransportError(
+                        "ACP 会话等待超时",
+                        ErrorCategory.CAPACITY,
+                        True,
+                    ) from exc
+                record_lock = record.lock
+            worker = await self._select_worker(
+                request.model,
+                request.effort,
+                record.worker_id if record else None,
+            )
+        except BaseException:
+            if record_lock is not None:
+                record_lock.release()
+            self._capacity.release()
+            raise
         worker.active += 1
         try:
             async with worker.lock:
+                rebuild_reason: str | None = None
                 if record is None:
                     upstream_id = await worker.new_session()
                     if request.session_id and self.settings.session_reuse_enabled:
                         record = SessionRecord(
                             request.session_id, worker.id, upstream_id
                         )
+                        await record.lock.acquire()
+                        record_lock = record.lock
                         await self.sessions.put(record)
                 else:
-                    if not record.upstream_session_id:
-                        record.worker_id = worker.id
-                        record.upstream_session_id = await worker.new_session()
-                        record.rebuilt = True
-                        await self.sessions.put(record)
-                    upstream_id = record.upstream_session_id
+                    if (
+                        record.worker_id != worker.id
+                        or not record.upstream_session_id
+                    ):
+                        upstream_id = await self._rebuild_session(record, worker)
+                        rebuild_reason = "worker_changed"
+                    else:
+                        upstream_id = record.upstream_session_id
+
+                latest_turn = self._latest_user_turn(request.prompt)
+                if record and record.turn_count and not record.rebuilt:
+                    reason = self._rotation_reason(
+                        record, request.prompt, latest_turn
+                    )
+                    if reason:
+                        upstream_id = await self._rebuild_session(record, worker)
+                        rebuild_reason = reason
+
                 prompt = (
-                    self._latest_user_turn(request.prompt)
-                    if record and record.history and not record.rebuilt
+                    latest_turn
+                    if record and record.turn_count and not record.rebuilt
                     else request.prompt
                 )
-                async for event in worker.prompt(upstream_id, prompt):
-                    yield event
-                if record:
-                    record.history.append(request.prompt)
+                retried_context_overflow = False
+                succeeded = False
+                completed_output_chars = 0
+                while True:
+                    retry_with_full_prompt = False
+                    emitted_output = False
+                    attempt_output_chars = 0
+                    async for event in worker.prompt(upstream_id, prompt):
+                        if event.type in {
+                            EventType.TEXT_DELTA,
+                            EventType.THINKING_DELTA,
+                            EventType.TOOL,
+                        }:
+                            emitted_output = True
+                        if event.type in {
+                            EventType.TEXT_DELTA,
+                            EventType.THINKING_DELTA,
+                        }:
+                            attempt_output_chars += len(event.text)
+                        if (
+                            event.type is EventType.ERROR
+                            and record is not None
+                            and not emitted_output
+                            and not retried_context_overflow
+                            and self._is_context_overflow(event.text)
+                        ):
+                            upstream_id = await self._rebuild_session(
+                                record, worker
+                            )
+                            prompt = request.prompt
+                            retried_context_overflow = True
+                            retry_with_full_prompt = True
+                            rebuild_reason = "context_overflow"
+                            break
+                        if event.type is EventType.ERROR and record is not None:
+                            record.upstream_session_id = ""
+                            record.turn_count = 0
+                            record.upstream_context_chars = 0
+                            record.rebuilt = True
+                        if event.type is EventType.DONE:
+                            succeeded = True
+                            completed_output_chars = attempt_output_chars
+                        if (
+                            rebuild_reason is not None
+                            and event.type is not EventType.ERROR
+                        ):
+                            event.data.setdefault("session_rebuilt", True)
+                            event.data.setdefault(
+                                "session_rebuild_reason", rebuild_reason
+                            )
+                            rebuild_reason = None
+                        yield event
+                    if retry_with_full_prompt:
+                        continue
+                    break
+
+                if record and succeeded:
+                    record.turn_count += 1
+                    record.last_prompt_chars = len(request.prompt)
+                    if prompt == request.prompt:
+                        record.upstream_context_chars = (
+                            len(prompt) + completed_output_chars
+                        )
+                    else:
+                        record.upstream_context_chars += (
+                            len(prompt) + completed_output_chars
+                        )
                     record.last_used = asyncio.get_running_loop().time()
                     record.rebuilt = False
+                    await self.sessions.put(record)
         except Exception as exc:
             yield GenerationEvent(
                 EventType.ERROR,
@@ -392,6 +559,8 @@ class AcpTransport:
             )
         finally:
             worker.active -= 1
+            if record_lock is not None:
+                record_lock.release()
             self._capacity.release()
 
     @staticmethod

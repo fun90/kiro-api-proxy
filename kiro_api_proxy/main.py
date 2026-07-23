@@ -290,6 +290,14 @@ async def _events(
         upstream = transport.stream(generation)
         try:
             async for event in upstream:
+                if event.data.get("session_rebuilt"):
+                    _log(
+                        "session_rebuilt",
+                        transport=event.data.get("transport", transport.name),
+                        reason=event.data.get(
+                            "session_rebuild_reason", "unknown"
+                        ),
+                    )
                 if (
                     client_request is not None
                     and await client_request.is_disconnected()

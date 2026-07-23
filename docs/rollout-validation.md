@@ -21,9 +21,15 @@
 - 关闭增量流时恢复单块输出。
 - 首个 ACP 文本事件的代理转发耗时实测 0.44 毫秒；
 - 3 个并发请求全部成功，客户端提前断开后服务和 2 个 worker 保持健康；
+- ACP worker 池满载时连续请求均立即降级，容量许可不会泄漏；
+- 忙碌的会话亲和 worker 不再阻塞其他会话；代理会扩容或替换空闲的
+  异模型 worker，同时继续使用会话锁保证同一会话顺序；
 - OpenAI Python SDK、Anthropic Python SDK、Claude Code 2.1.217 与
   OpenCode Desktop 1.18.4 均通过标准增量 SSE；
 - OpenCode 同一会话两轮请求复用相同会话 ID，第二轮正确恢复验证口令；
+- 同一流式会话先发送长 Prompt、再发送压缩后的短 Prompt，两轮均返回
+  完整增量 SSE 与 `[DONE]`，日志记录
+  `session_rebuilt reason=client_compacted`；
 - API Key 改由权限 `0600` 的文件读取，不再进入服务进程环境。
 
 当前安装配置为缓存、增量流、ACP、会话复用开启，Runtime 关闭。
