@@ -44,6 +44,7 @@ from .transports import (
 )
 from .transports.acp import AcpTransport
 from .transports.runtime import RuntimeTransport
+from .usage import TokenUsage, estimate_tokens
 
 logger = logging.getLogger("uvicorn.error")
 logger.setLevel(logging.INFO)
@@ -428,6 +429,10 @@ async def anthropic_stream(
     session_id: str | None = None,
     working_directory: str | None = None,
 ) -> AsyncIterator[str]:
+    prompt = messages_to_prompt(anthropic_to_messages(request))
+    if working_directory:
+        prompt = f"Working directory: {working_directory}\n\n{prompt}"
+    usage = TokenUsage(input_tokens=estimate_tokens(prompt))
     yield anthropic_event(
         "message_start",
         {
@@ -440,7 +445,12 @@ async def anthropic_stream(
                 "content": [],
                 "stop_reason": None,
                 "stop_sequence": None,
-                "usage": {"input_tokens": 0, "output_tokens": 0},
+                "usage": {
+                    "input_tokens": usage.input_tokens,
+                    "output_tokens": 0,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 0,
+                },
             },
         },
     )
@@ -452,10 +462,8 @@ async def anthropic_stream(
             "content_block": {"type": "text", "text": ""},
         },
     )
+    output_parts: list[str] = []
     try:
-        prompt = messages_to_prompt(anthropic_to_messages(request))
-        if working_directory:
-            prompt = f"Working directory: {working_directory}\n\n{prompt}"
         async for event in _events(
             anthropic_upstream_model(request),
             prompt,
@@ -464,6 +472,7 @@ async def anthropic_stream(
             session_id,
         ):
             if event.type is EventType.TEXT_DELTA:
+                output_parts.append(event.text)
                 yield anthropic_event(
                     "content_block_delta",
                     {
@@ -472,6 +481,8 @@ async def anthropic_stream(
                         "delta": {"type": "text_delta", "text": event.text},
                     },
                 )
+            elif event.type is EventType.USAGE:
+                usage.update(event.data)
             elif event.type is EventType.ERROR:
                 yield anthropic_event(
                     "error",
@@ -490,6 +501,8 @@ async def anthropic_stream(
             },
         )
         return
+    if usage.output_tokens <= 0:
+        usage.output_tokens = estimate_tokens("".join(output_parts))
     yield anthropic_event(
         "content_block_stop", {"type": "content_block_stop", "index": 0}
     )
@@ -498,7 +511,7 @@ async def anthropic_stream(
         {
             "type": "message_delta",
             "delta": {"stop_reason": "end_turn", "stop_sequence": None},
-            "usage": {"output_tokens": 0},
+            "usage": {"output_tokens": usage.output_tokens},
         },
     )
     yield anthropic_event("message_stop", {"type": "message_stop"})
@@ -761,6 +774,8 @@ async def chat(request: ChatRequest, raw_request: Request, response: Response):
         )
     else:
         content = await call_kiro(request.model, prompt, request.reasoning_effort)
+    prompt_tokens = estimate_tokens(prompt)
+    completion_tokens = estimate_tokens(content)
     return {
         "id": completion_id,
         "object": "chat.completion",
@@ -773,7 +788,11 @@ async def chat(request: ChatRequest, raw_request: Request, response: Response):
                 "finish_reason": "stop",
             }
         ],
-        "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+        "usage": {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
+        },
     }
 
 
@@ -789,17 +808,16 @@ async def responses(
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
-    call_args = (
-        request.model,
-        messages_to_prompt(responses_to_messages(request)),
-        request.reasoning_effort,
-    )
+    prompt = messages_to_prompt(responses_to_messages(request))
+    call_args = (request.model, prompt, request.reasoning_effort)
     content = (
         await call_kiro(*call_args, session_key)
         if session_key
         else await call_kiro(*call_args)
     )
     response_id = f"resp_{uuid.uuid4().hex}"
+    input_tokens = estimate_tokens(prompt)
+    output_tokens = estimate_tokens(content)
     return {
         "id": response_id,
         "object": "response",
@@ -818,7 +836,11 @@ async def responses(
             }
         ],
         "output_text": content,
-        "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+        "usage": {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": input_tokens + output_tokens,
+        },
     }
 
 
@@ -851,6 +873,8 @@ async def anthropic_messages(
         if session_key
         else await call_kiro(*call_args)
     )
+    input_tokens = estimate_tokens(prompt)
+    output_tokens = estimate_tokens(content)
     return {
         "id": message_id,
         "type": "message",
@@ -859,14 +883,17 @@ async def anthropic_messages(
         "content": [{"type": "text", "text": content}],
         "stop_reason": "end_turn",
         "stop_sequence": None,
-        "usage": {"input_tokens": 0, "output_tokens": 0},
+        "usage": {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+        },
     }
 
 
 @app.post("/v1/messages/count_tokens", dependencies=[Depends(authorize)])
 async def anthropic_count_tokens(request: AnthropicRequest):
     text = messages_to_prompt(anthropic_to_messages(request))
-    return {"input_tokens": max(1, len(text) // 4)}
+    return {"input_tokens": estimate_tokens(text)}
 
 
 @app.exception_handler(HTTPException)
