@@ -246,17 +246,21 @@ async def _claude_working_directory(session_id: str) -> str | None:
     return None
 
 
+_ERROR_STATUSES: dict[ErrorCategory, int] = {
+    ErrorCategory.AUTHENTICATION: 401,
+    ErrorCategory.MODEL_NOT_FOUND: 404,
+    ErrorCategory.TIMEOUT: 504,
+    ErrorCategory.CAPACITY: 503,
+    ErrorCategory.PROTOCOL: 502,
+    ErrorCategory.UPSTREAM: 502,
+    ErrorCategory.CANCELLED: 499,
+}
+
+
 def _http_error(exc: TransportError) -> HTTPException:
-    statuses = {
-        ErrorCategory.AUTHENTICATION: 401,
-        ErrorCategory.MODEL_NOT_FOUND: 404,
-        ErrorCategory.TIMEOUT: 504,
-        ErrorCategory.CAPACITY: 503,
-        ErrorCategory.PROTOCOL: 502,
-        ErrorCategory.UPSTREAM: 502,
-        ErrorCategory.CANCELLED: 499,
-    }
-    return HTTPException(status_code=statuses[exc.category], detail=str(exc))
+    return HTTPException(
+        status_code=_ERROR_STATUSES.get(exc.category, 502), detail=str(exc)
+    )
 
 
 async def call_kiro(
@@ -441,6 +445,38 @@ async def _events(
         )
 
 
+async def _collect_generation(
+    model: str,
+    prompt: str,
+    effort: str | None,
+    client_request: Request | None = None,
+    session_id: str | None = None,
+) -> tuple[str, TokenUsage]:
+    """消费 _events 累积完整文本与真实用量，供非流式端点复用。
+
+    上游提供 token 统计时直接采用，否则由 ensure_estimates 回退估算，
+    从而让非流式响应也回传准确的上下文用量。
+    """
+    usage = TokenUsage()
+    parts: list[str] = []
+    async for event in _events(model, prompt, effort, client_request, session_id):
+        if event.type is EventType.TEXT_DELTA:
+            parts.append(event.text)
+        elif event.type is EventType.USAGE:
+            usage.update(event.data)
+        elif event.type is EventType.ERROR:
+            category = ErrorCategory(
+                event.data.get("category", ErrorCategory.UPSTREAM.value)
+            )
+            raise HTTPException(
+                status_code=_ERROR_STATUSES.get(category, 502),
+                detail=event.text,
+            )
+    content = "".join(parts).strip()
+    usage.ensure_estimates(prompt, content)
+    return content, usage
+
+
 def chat_chunk(
     completion_id: str,
     created: int,
@@ -531,7 +567,8 @@ async def anthropic_stream(
     prompt = messages_to_prompt(anthropic_to_messages(request))
     if working_directory:
         prompt = f"Working directory: {working_directory}\n\n{prompt}"
-    usage = TokenUsage(input_tokens=estimate_tokens(prompt))
+    usage = TokenUsage()
+    input_estimate = estimate_tokens(prompt)
     yield anthropic_event(
         "message_start",
         {
@@ -545,7 +582,7 @@ async def anthropic_stream(
                 "stop_reason": None,
                 "stop_sequence": None,
                 "usage": {
-                    "input_tokens": usage.input_tokens,
+                    "input_tokens": input_estimate,
                     "output_tokens": 0,
                     "cache_creation_input_tokens": 0,
                     "cache_read_input_tokens": 0,
@@ -600,8 +637,7 @@ async def anthropic_stream(
             },
         )
         return
-    if usage.output_tokens <= 0:
-        usage.output_tokens = estimate_tokens("".join(output_parts))
+    usage.ensure_estimates(prompt, "".join(output_parts))
     yield anthropic_event(
         "content_block_stop", {"type": "content_block_stop", "index": 0}
     )
@@ -610,7 +646,7 @@ async def anthropic_stream(
         {
             "type": "message_delta",
             "delta": {"stop_reason": "end_turn", "stop_sequence": None},
-            "usage": {"output_tokens": usage.output_tokens},
+            "usage": usage.anthropic(),
         },
     )
     yield anthropic_event("message_stop", {"type": "message_stop"})
@@ -883,14 +919,13 @@ async def chat(request: ChatRequest, raw_request: Request, response: Response):
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
-    if session_key:
-        content = await call_kiro(
-            request.model, prompt, request.reasoning_effort, session_key
-        )
-    else:
-        content = await call_kiro(request.model, prompt, request.reasoning_effort)
-    prompt_tokens = estimate_tokens(prompt)
-    completion_tokens = estimate_tokens(content)
+    content, usage = await _collect_generation(
+        request.model,
+        prompt,
+        request.reasoning_effort,
+        raw_request,
+        session_key,
+    )
     return {
         "id": completion_id,
         "object": "chat.completion",
@@ -903,11 +938,7 @@ async def chat(request: ChatRequest, raw_request: Request, response: Response):
                 "finish_reason": "stop",
             }
         ],
-        "usage": {
-            "prompt_tokens": prompt_tokens,
-            "completion_tokens": completion_tokens,
-            "total_tokens": prompt_tokens + completion_tokens,
-        },
+        "usage": usage.chat_completions(),
     }
 
 
@@ -924,15 +955,14 @@ async def responses(
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
     prompt = messages_to_prompt(responses_to_messages(request))
-    call_args = (request.model, prompt, request.reasoning_effort)
-    content = (
-        await call_kiro(*call_args, session_key)
-        if session_key
-        else await call_kiro(*call_args)
+    content, usage = await _collect_generation(
+        request.model,
+        prompt,
+        request.reasoning_effort,
+        raw_request,
+        session_key,
     )
     response_id = f"resp_{uuid.uuid4().hex}"
-    input_tokens = estimate_tokens(prompt)
-    output_tokens = estimate_tokens(content)
     return {
         "id": response_id,
         "object": "response",
@@ -951,11 +981,7 @@ async def responses(
             }
         ],
         "output_text": content,
-        "usage": {
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens,
-            "total_tokens": input_tokens + output_tokens,
-        },
+        "usage": usage.responses(),
     }
 
 
@@ -982,14 +1008,13 @@ async def anthropic_messages(
     prompt = messages_to_prompt(anthropic_to_messages(request))
     if working_directory:
         prompt = f"Working directory: {working_directory}\n\n{prompt}"
-    call_args = (anthropic_upstream_model(request), prompt)
-    content = (
-        await call_kiro(*call_args, session_id=session_key)
-        if session_key
-        else await call_kiro(*call_args)
+    content, usage = await _collect_generation(
+        anthropic_upstream_model(request),
+        prompt,
+        None,
+        raw_request,
+        session_key,
     )
-    input_tokens = estimate_tokens(prompt)
-    output_tokens = estimate_tokens(content)
     return {
         "id": message_id,
         "type": "message",
@@ -998,10 +1023,7 @@ async def anthropic_messages(
         "content": [{"type": "text", "text": content}],
         "stop_reason": "end_turn",
         "stop_sequence": None,
-        "usage": {
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens,
-        },
+        "usage": usage.anthropic(),
     }
 
 

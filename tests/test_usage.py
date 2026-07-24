@@ -50,3 +50,33 @@ def test_acp_prompt_usage_is_normalized():
     assert usage.cache_read_input_tokens == 80
     assert usage.cache_creation_input_tokens == 10
     assert usage.reasoning_tokens == 5
+
+
+def test_ensure_estimates_prefers_context_tokens_for_input():
+    usage = TokenUsage(context_tokens=4096)
+    usage.ensure_estimates("很短的提示", "输出")
+    # 缺少独立 input_tokens 时优先采用上游上报的真实上下文用量。
+    assert usage.input_tokens == 4096
+    assert usage.output_tokens > 0
+
+
+def test_ensure_estimates_falls_back_to_char_estimate():
+    usage = TokenUsage()
+    usage.ensure_estimates("你好世界", "输出")
+    # 上游既无 input_tokens 也无 context_tokens 时才退回字符估算。
+    assert usage.input_tokens == estimate_tokens("你好世界")
+
+
+def test_anthropic_usage_includes_cache_fields():
+    usage = TokenUsage(
+        input_tokens=120,
+        output_tokens=8,
+        cache_read_input_tokens=100,
+        cache_creation_input_tokens=5,
+    )
+    assert usage.anthropic() == {
+        "input_tokens": 120,
+        "output_tokens": 8,
+        "cache_read_input_tokens": 100,
+        "cache_creation_input_tokens": 5,
+    }

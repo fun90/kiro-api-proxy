@@ -110,6 +110,65 @@ async def test_anthropic_stream_prefers_upstream_output_usage(monkeypatch):
     assert delta["usage"]["output_tokens"] == 7
 
 
+async def test_anthropic_stream_delta_carries_full_usage(monkeypatch):
+    async def usage_events(*args, **kwargs):
+        yield GenerationEvent(EventType.TEXT_DELTA, text="你好")
+        yield GenerationEvent(
+            EventType.USAGE,
+            data={"context_tokens": 3200, "context_window": 200000},
+        )
+        yield GenerationEvent(
+            EventType.USAGE,
+            data={
+                "input_tokens": 3210,
+                "output_tokens": 7,
+                "cache_read_input_tokens": 3000,
+                "cache_creation_input_tokens": 12,
+            },
+        )
+        yield GenerationEvent(EventType.DONE)
+
+    monkeypatch.setattr(main, "_events", usage_events)
+    request = main.AnthropicRequest(
+        model="auto",
+        messages=[{"role": "user", "content": "你好"}],
+    )
+    chunks = [
+        chunk
+        async for chunk in main.anthropic_stream(request, "msg_test")
+    ]
+    # message_delta 必须回传真实 input 与缓存 token，供客户端计算上下文占用。
+    delta = json.loads(chunks[-2].split("data: ", 1)[1])["usage"]
+    assert delta["input_tokens"] == 3210
+    assert delta["output_tokens"] == 7
+    assert delta["cache_read_input_tokens"] == 3000
+    assert delta["cache_creation_input_tokens"] == 12
+
+
+async def test_anthropic_stream_falls_back_to_context_tokens(monkeypatch):
+    async def usage_events(*args, **kwargs):
+        yield GenerationEvent(EventType.TEXT_DELTA, text="你好")
+        # 上游只给出上下文用量（used/size），未给出独立 inputTokens。
+        yield GenerationEvent(
+            EventType.USAGE,
+            data={"context_tokens": 4096, "context_window": 200000},
+        )
+        yield GenerationEvent(EventType.DONE)
+
+    monkeypatch.setattr(main, "_events", usage_events)
+    request = main.AnthropicRequest(
+        model="auto",
+        messages=[{"role": "user", "content": "你好"}],
+    )
+    chunks = [
+        chunk
+        async for chunk in main.anthropic_stream(request, "msg_test")
+    ]
+    delta = json.loads(chunks[-2].split("data: ", 1)[1])["usage"]
+    # 缺少独立 input_tokens 时，回退采用上游真实上下文用量。
+    assert delta["input_tokens"] == 4096
+
+
 async def test_responses_stream_is_incremental(monkeypatch):
     monkeypatch.setattr(main, "_events", _fake_events)
     request = main.ResponsesRequest(model="auto", input="你好", stream=True)

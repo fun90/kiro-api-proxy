@@ -75,7 +75,9 @@ class TokenUsage:
 
     def ensure_estimates(self, prompt: str, output: str) -> None:
         if self.input_tokens <= 0:
-            self.input_tokens = estimate_tokens(prompt)
+            # 上游未给出 input_tokens 时，优先采用其上报的真实上下文用量
+            # （usage_update 的 used），否则退回字符级估算。
+            self.input_tokens = self.context_tokens or estimate_tokens(prompt)
         if self.output_tokens <= 0:
             self.output_tokens = estimate_tokens(output)
 
@@ -105,6 +107,14 @@ class TokenUsage:
                 "reasoning_tokens": self.reasoning_tokens,
             },
             "total_tokens": self.input_tokens + self.output_tokens,
+        }
+
+    def anthropic(self) -> dict[str, Any]:
+        return {
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "cache_read_input_tokens": self.cache_read_input_tokens,
+            "cache_creation_input_tokens": self.cache_creation_input_tokens,
         }
 
 

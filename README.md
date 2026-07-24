@@ -54,9 +54,13 @@ cp .env.example .env
 
 - 暂不转换 OpenAI `tools`/`tool_calls`；可通过 `KIRO_TRUST_TOOLS` 控制 Kiro 自身工具。
 - Claude API 支持文本消息、system、Thinking 映射及 SSE；工具块会作为文本上下文传给 Kiro，不返回原生 `tool_use`。
-- Anthropic 流式响应优先使用 ACP 提供的 token 统计，并在上游未提供时按
-  Prompt 与输出文本估算；OpenAI/Anthropic 非流式响应和
-  `/v1/messages/count_tokens` 使用相同估算规则，不再固定返回零。
+- Anthropic 流式响应优先使用 ACP 提供的 token 统计：`message_delta`
+  回传真实的 `input_tokens`、缓存与 `output_tokens`，供客户端准确计算
+  会话上下文占用；上游未提供时优先采用其上报的上下文用量（`used`），
+  再退回按 Prompt 与输出文本估算。
+- OpenAI/Anthropic 非流式响应也复用同一生成管线，优先回传上游真实
+  token 用量，仅在上游未提供时才估算；`/v1/messages/count_tokens`
+  为请求前预估接口，无上游调用，始终使用字符级估算。
 - OpenAI Chat Completions 在 `stream_options.include_usage=true` 时于
   `[DONE]` 前返回最终用量 chunk；Responses 流的 `response.completed`
   也包含输入、输出、缓存、推理和总 token 用量。
