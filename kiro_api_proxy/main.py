@@ -334,6 +334,7 @@ async def _events(
             return
         upstream = transport.stream(generation)
         deadline = asyncio.get_running_loop().time() + settings.timeout_seconds
+        next_event: asyncio.Task[GenerationEvent] | None = None
         try:
             while True:
                 remaining = deadline - asyncio.get_running_loop().time()
@@ -378,6 +379,8 @@ async def _events(
                     event = next_event.result()
                 except StopAsyncIteration:
                     break
+                finally:
+                    next_event = None
                 if (
                     client_request is not None
                     and await client_request.is_disconnected()
@@ -423,6 +426,9 @@ async def _events(
                     )
                 yield event
         finally:
+            if next_event is not None and not next_event.done():
+                next_event.cancel()
+                await asyncio.gather(next_event, return_exceptions=True)
             await upstream.aclose()
     finally:
         async with _inflight_lock:

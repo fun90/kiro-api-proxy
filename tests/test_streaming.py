@@ -261,6 +261,39 @@ async def test_generation_has_absolute_total_timeout(monkeypatch):
     assert events[-1].data["category"] == ErrorCategory.TIMEOUT.value
 
 
+async def test_outer_cancellation_stops_pending_upstream_before_close(
+    monkeypatch,
+):
+    started = asyncio.Event()
+    closed = asyncio.Event()
+
+    class FakeTransport:
+        name = "fake"
+
+        async def stream(self, request):
+            try:
+                started.set()
+                await asyncio.Event().wait()
+                yield GenerationEvent(EventType.DONE)
+            finally:
+                closed.set()
+
+    async def valid_model(model):
+        return None
+
+    monkeypatch.setattr(main, "transport", FakeTransport())
+    monkeypatch.setattr(main, "ensure_model", valid_model)
+
+    async def consume():
+        return [item async for item in main._events("auto", "取消", None)]
+
+    task = asyncio.create_task(consume())
+    await started.wait()
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+    assert closed.is_set()
+
+
 async def test_cli_decodes_chinese_across_byte_boundaries(monkeypatch):
     class Stream:
         def __init__(self, chunks):
