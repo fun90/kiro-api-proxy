@@ -229,6 +229,12 @@ class AcpWorker:
                 yield event
                 if event.type in {EventType.DONE, EventType.ERROR}:
                     break
+        except TimeoutError:
+            yield GenerationEvent(
+                EventType.ERROR,
+                text="ACP 请求超时",
+                data={"category": ErrorCategory.TIMEOUT.value},
+            )
         except asyncio.CancelledError:
             await self.agent.cancel(session_id)
             task.cancel()

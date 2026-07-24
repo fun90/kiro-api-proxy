@@ -70,7 +70,7 @@ cp .env.example .env
 - `KIRO_CLI_PATH`：默认 `kiro-cli`。
 - `DEFAULT_MODEL`：默认 `auto`。
 - `MAX_CONCURRENCY`：默认 `2`。
-- `REQUEST_TIMEOUT_SECONDS`：默认 `900`。
+- `REQUEST_TIMEOUT_SECONDS`：请求绝对总超时，默认 `600`。
 - `KIRO_WORKING_DIRECTORY`：Kiro 允许执行的根目录。Claude Code
   请求会通过会话 ID 解析本地 transcript 中的 `cwd`；其他客户端的系统
   提示中存在 `Working directory` 时也可解析。代理校验目录位于根目录内，

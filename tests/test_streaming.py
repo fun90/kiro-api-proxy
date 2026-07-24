@@ -1,8 +1,9 @@
 import asyncio
 import json
+from dataclasses import replace
 
 from kiro_api_proxy import main
-from kiro_api_proxy.transports import EventType, GenerationEvent
+from kiro_api_proxy.transports import ErrorCategory, EventType, GenerationEvent
 from kiro_api_proxy.config import Settings
 from kiro_api_proxy.transports import GenerationRequest
 from kiro_api_proxy.transports.cli import CliTransport
@@ -167,6 +168,97 @@ async def test_client_disconnect_closes_upstream(monkeypatch):
         )
     ] == []
     assert closed
+
+
+async def test_client_disconnect_cancels_silent_upstream(monkeypatch):
+    cancelled = asyncio.Event()
+
+    class FakeTransport:
+        name = "fake"
+
+        async def stream(self, request):
+            try:
+                await asyncio.Event().wait()
+                yield GenerationEvent(EventType.DONE)
+            finally:
+                cancelled.set()
+
+    class Disconnected:
+        async def is_disconnected(self):
+            return True
+
+    async def valid_model(model):
+        return None
+
+    monkeypatch.setattr(main, "transport", FakeTransport())
+    monkeypatch.setattr(main, "ensure_model", valid_model)
+    assert [
+        item
+        async for item in main._events(
+            "auto", "静默请求", None, Disconnected()
+        )
+    ] == []
+    assert cancelled.is_set()
+
+
+async def test_duplicate_inflight_generation_is_rejected(monkeypatch):
+    release = asyncio.Event()
+    started = asyncio.Event()
+
+    class FakeTransport:
+        name = "fake"
+
+        async def stream(self, request):
+            started.set()
+            await release.wait()
+            yield GenerationEvent(EventType.DONE)
+
+    async def valid_model(model):
+        return None
+
+    monkeypatch.setattr(main, "transport", FakeTransport())
+    monkeypatch.setattr(main, "ensure_model", valid_model)
+
+    async def consume():
+        return [
+            item
+            async for item in main._events(
+                "auto", "相同请求", None, session_id="session"
+            )
+        ]
+
+    first = asyncio.create_task(consume())
+    await started.wait()
+    duplicate = await consume()
+    assert duplicate[0].type is EventType.ERROR
+    assert duplicate[0].data["category"] == ErrorCategory.CAPACITY.value
+    release.set()
+    await first
+
+
+async def test_generation_has_absolute_total_timeout(monkeypatch):
+    class FakeTransport:
+        name = "fake"
+
+        async def stream(self, request):
+            await asyncio.sleep(1)
+            yield GenerationEvent(EventType.DONE)
+
+    async def valid_model(model):
+        return None
+
+    monkeypatch.setattr(main, "transport", FakeTransport())
+    monkeypatch.setattr(main, "ensure_model", valid_model)
+    monkeypatch.setattr(
+        main,
+        "settings",
+        replace(main.settings, timeout_seconds=0.02),
+    )
+    events = [
+        item async for item in main._events("auto", "超时请求", None)
+    ]
+    assert events[-1].type is EventType.ERROR
+    assert events[-1].data["category"] == ErrorCategory.TIMEOUT.value
 
 
 async def test_cli_decodes_chinese_across_byte_boundaries(monkeypatch):

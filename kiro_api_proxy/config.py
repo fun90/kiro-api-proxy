@@ -54,7 +54,7 @@ class Settings:
             kiro_cli=os.getenv("KIRO_CLI_PATH", "kiro-cli"),
             api_key=api_key,
             default_model=os.getenv("DEFAULT_MODEL", "auto"),
-            timeout_seconds=float(os.getenv("REQUEST_TIMEOUT_SECONDS", "900")),
+            timeout_seconds=float(os.getenv("REQUEST_TIMEOUT_SECONDS", "600")),
             max_concurrency=int(os.getenv("MAX_CONCURRENCY", "2")),
             working_directory=os.getenv(
                 "KIRO_WORKING_DIRECTORY", str(Path.cwd())

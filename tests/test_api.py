@@ -43,6 +43,22 @@ async def test_health():
     assert response.json() == {"status": "ok"}
 
 
+async def test_health_supports_head():
+    async with AsyncClient(
+        transport=ASGITransport(app=main.app), base_url="http://test"
+    ) as client:
+        response = await client.head("/health")
+    assert response.status_code == 200
+
+
+async def test_root_supports_head():
+    async with AsyncClient(
+        transport=ASGITransport(app=main.app), base_url="http://test"
+    ) as client:
+        response = await client.head("/")
+    assert response.status_code == 200
+
+
 async def test_chat(monkeypatch):
     async def fake_call(
         model: str, prompt: str, effort: str | None = None

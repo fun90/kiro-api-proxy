@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import codecs
 import json
+import os
 import re
+import signal
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -49,14 +51,33 @@ class CliTransport:
         return None
 
     async def close(self) -> None:
-        for process in list(self._processes):
-            if process.returncode is None:
-                process.terminate()
-        if self._processes:
-            await asyncio.gather(
-                *(process.wait() for process in self._processes),
-                return_exceptions=True,
-            )
+        await asyncio.gather(
+            *(self._terminate_process(process) for process in self._processes),
+            return_exceptions=True,
+        )
+        self._processes.clear()
+
+    @staticmethod
+    async def _terminate_process(
+        process: asyncio.subprocess.Process,
+        grace_seconds: float = 2,
+    ) -> None:
+        if process.returncode is not None:
+            return
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except (AttributeError, ProcessLookupError):
+            process.terminate()
+        try:
+            await asyncio.wait_for(process.wait(), timeout=grace_seconds)
+            return
+        except TimeoutError:
+            pass
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except (AttributeError, ProcessLookupError):
+            process.kill()
+        await process.wait()
 
     def command_for(self, request: GenerationRequest) -> list[str]:
         command = [
@@ -95,6 +116,7 @@ class CliTransport:
                 stderr=asyncio.subprocess.PIPE,
                 cwd=request.working_directory or self.settings.working_directory,
                 env=self._environment(request.working_directory),
+                start_new_session=True,
             )
         except FileNotFoundError as exc:
             raise TransportError(
@@ -185,30 +207,17 @@ class CliTransport:
                 else:
                     yield GenerationEvent(EventType.DONE)
             except (TimeoutError, asyncio.TimeoutError):
-                process.kill()
-                await process.wait()
+                await self._terminate_process(process, grace_seconds=0)
                 yield GenerationEvent(
                     EventType.ERROR,
                     text="Kiro 请求超时",
                     data={"category": ErrorCategory.TIMEOUT.value},
                 )
             except asyncio.CancelledError:
-                if process.returncode is None:
-                    process.terminate()
-                    try:
-                        await asyncio.wait_for(process.wait(), timeout=2)
-                    except TimeoutError:
-                        process.kill()
-                        await process.wait()
+                await self._terminate_process(process)
                 raise
             finally:
-                if process.returncode is None:
-                    process.terminate()
-                    try:
-                        await asyncio.wait_for(process.wait(), timeout=2)
-                    except TimeoutError:
-                        process.kill()
-                        await process.wait()
+                await self._terminate_process(process)
                 self._processes.discard(process)
 
     async def cancel(self, request_id: str) -> None:

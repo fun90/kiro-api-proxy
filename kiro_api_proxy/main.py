@@ -71,6 +71,8 @@ model_cache = ModelCache(
     settings.model_cache_stale_seconds,
 )
 _credential_fingerprint: tuple[int, ...] | None = None
+_inflight_generations: set[str] = set()
+_inflight_lock = asyncio.Lock()
 
 # 保留旧模块级名称，避免现有集成导入时破坏兼容性。
 KIRO_CLI = settings.kiro_cli
@@ -288,6 +290,26 @@ async def _events(
 ) -> AsyncIterator[GenerationEvent]:
     generation = _generation_request(model, prompt, effort, session_id)
     await ensure_model(generation.model)
+    fingerprint = hashlib.sha256(
+        "\0".join(
+            (
+                generation.model,
+                generation.effort,
+                generation.session_id or "",
+                generation.working_directory or "",
+                generation.prompt,
+            )
+        ).encode()
+    ).hexdigest()
+    async with _inflight_lock:
+        if fingerprint in _inflight_generations:
+            yield GenerationEvent(
+                EventType.ERROR,
+                text="相同请求正在处理中，请勿重复提交",
+                data={"category": ErrorCategory.CAPACITY.value},
+            )
+            return
+        _inflight_generations.add(fingerprint)
     started = time.perf_counter()
     first = True
     try:
@@ -311,8 +333,57 @@ async def _events(
             yield GenerationEvent(EventType.DONE)
             return
         upstream = transport.stream(generation)
+        deadline = asyncio.get_running_loop().time() + settings.timeout_seconds
         try:
-            async for event in upstream:
+            while True:
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    yield GenerationEvent(
+                        EventType.ERROR,
+                        text="Kiro 请求总时长超限",
+                        data={"category": ErrorCategory.TIMEOUT.value},
+                    )
+                    return
+                next_event = asyncio.create_task(anext(upstream))
+                # 先让上游生成器进入执行态，确保随后取消时能运行其 finally。
+                await asyncio.sleep(0)
+                while not next_event.done():
+                    remaining = deadline - asyncio.get_running_loop().time()
+                    if remaining <= 0:
+                        next_event.cancel()
+                        await asyncio.gather(
+                            next_event, return_exceptions=True
+                        )
+                        yield GenerationEvent(
+                            EventType.ERROR,
+                            text="Kiro 请求总时长超限",
+                            data={"category": ErrorCategory.TIMEOUT.value},
+                        )
+                        return
+                    if (
+                        client_request is not None
+                        and await client_request.is_disconnected()
+                    ):
+                        next_event.cancel()
+                        await asyncio.gather(
+                            next_event, return_exceptions=True
+                        )
+                        _log("client_disconnected", transport=transport.name)
+                        return
+                    await asyncio.wait(
+                        {next_event},
+                        timeout=min(0.25, remaining),
+                    )
+                try:
+                    event = next_event.result()
+                except StopAsyncIteration:
+                    break
+                if (
+                    client_request is not None
+                    and await client_request.is_disconnected()
+                ):
+                    _log("client_disconnected", transport=transport.name)
+                    return
                 if event.data.get("session_rebuilt"):
                     _log(
                         "session_rebuilt",
@@ -321,12 +392,6 @@ async def _events(
                             "session_rebuild_reason", "unknown"
                         ),
                     )
-                if (
-                    client_request is not None
-                    and await client_request.is_disconnected()
-                ):
-                    _log("client_disconnected", transport=transport.name)
-                    return
                 if first and event.type in {
                     EventType.TEXT_DELTA,
                     EventType.THINKING_DELTA,
@@ -360,6 +425,8 @@ async def _events(
         finally:
             await upstream.aclose()
     finally:
+        async with _inflight_lock:
+            _inflight_generations.discard(fingerprint)
         _log(
             "stream_complete",
             transport=transport.name,
@@ -723,11 +790,7 @@ app = FastAPI(title="Kiro API Proxy", version="1.1.0", lifespan=lifespan)
 
 @app.middleware("http")
 async def request_context(request: Request, call_next):
-    request_id = (
-        request.headers.get("x-request-id")
-        or request.headers.get("x-claude-code-session-id")
-        or uuid.uuid4().hex
-    )
+    request_id = request.headers.get("x-request-id") or uuid.uuid4().hex
     token = request_id_var.set(request_id)
     started = time.perf_counter()
     try:
@@ -749,9 +812,19 @@ async def root() -> dict[str, str]:
     return {"name": "Kiro API Proxy", "status": "ok", "docs": "/docs"}
 
 
+@app.head("/")
+async def root_head() -> Response:
+    return Response(status_code=200)
+
+
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.head("/health")
+async def health_head() -> Response:
+    return Response(status_code=200)
 
 
 @app.get("/v1/models", dependencies=[Depends(authorize)])

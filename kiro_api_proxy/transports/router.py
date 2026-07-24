@@ -128,7 +128,7 @@ class AdaptiveTransport:
                 if emitted:
                     yield last_error
                     return
-            except (TransportError, ConnectionError) as exc:
+            except (TransportError, ConnectionError, TimeoutError) as exc:
                 self._failure(item)
                 last_error = GenerationEvent(
                     EventType.ERROR,
