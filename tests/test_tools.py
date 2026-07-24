@@ -164,6 +164,67 @@ class TestAnthropicToolResults:
             }
         ]
 
+    def test_preserves_completed_tool_turns_in_history(self):
+        messages = [
+            AnthropicMessage(role="user", content="依次读取两个文件"),
+            AnthropicMessage(
+                role="assistant",
+                content=[
+                    {
+                        "type": "tool_use",
+                        "id": "read_1",
+                        "name": "Read",
+                        "input": {"file_path": "/tmp/one.py"},
+                    }
+                ],
+            ),
+            AnthropicMessage(
+                role="user",
+                content=[
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "read_1",
+                        "content": "第一个文件的内容",
+                    }
+                ],
+            ),
+            AnthropicMessage(
+                role="assistant",
+                content=[
+                    {
+                        "type": "tool_use",
+                        "id": "read_2",
+                        "name": "Read",
+                        "input": {"file_path": "/tmp/two.py"},
+                    }
+                ],
+            ),
+            AnthropicMessage(
+                role="user",
+                content=[
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "read_2",
+                        "content": "第二个文件的内容",
+                    }
+                ],
+            ),
+        ]
+
+        history = anthropic_tool_history(messages)
+
+        assert len(history) == 4
+        historical_results = history[2]["userInputMessage"][
+            "userInputMessageContext"
+        ]["toolResults"]
+        assert historical_results[0]["toolUseId"] == "read_1"
+        assert historical_results[0]["content"] == [
+            {"text": "第一个文件的内容"}
+        ]
+        assert history[3]["assistantResponseMessage"]["toolUses"][0][
+            "toolUseId"
+        ] == "read_2"
+
     def test_orphaned_result_has_no_structured_history(self):
         messages = [
             AnthropicMessage(
@@ -225,3 +286,63 @@ class TestOpenAIToolResults:
             "name": "multiply",
             "input": {"a": 15, "b": 23},
         }
+
+    def test_preserves_completed_tool_turns_in_history(self):
+        messages = [
+            Message(role="user", content="依次计算"),
+            Message(
+                role="assistant",
+                content="",
+                tool_calls=[
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "multiply",
+                            "arguments": '{"a":2,"b":3}',
+                        },
+                    }
+                ],
+            ),
+            Message(
+                role="tool",
+                content="6",
+                tool_call_id="call_1",
+            ),
+            Message(
+                role="assistant",
+                content="",
+                tool_calls=[
+                    {
+                        "id": "call_2",
+                        "type": "function",
+                        "function": {
+                            "name": "multiply",
+                            "arguments": '{"a":6,"b":4}',
+                        },
+                    }
+                ],
+            ),
+            Message(
+                role="tool",
+                content="24",
+                tool_call_id="call_2",
+            ),
+        ]
+
+        history = openai_tool_history(messages)
+
+        assert len(history) == 4
+        historical_results = history[2]["userInputMessage"][
+            "userInputMessageContext"
+        ]["toolResults"]
+        assert historical_results == [
+            {
+                "toolUseId": "call_1",
+                "content": [{"text": "6"}],
+                "status": "success",
+            }
+        ]
+        assert history[3]["assistantResponseMessage"]["toolUses"][0][
+            "toolUseId"
+        ] == "call_2"

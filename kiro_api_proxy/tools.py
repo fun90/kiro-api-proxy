@@ -91,21 +91,11 @@ def _result_content(content: Any) -> list[dict[str, Any]]:
     return normalized or [{"text": ""}]
 
 
-def anthropic_tool_results(
-    messages: list[AnthropicMessage],
-) -> list[dict[str, Any]]:
-    """从最近一轮 user 消息提取 `tool_result` block → Kiro toolResults。
-
-    Agent 回路中，客户端会在新一轮请求的最后一条 user 消息里携带上一轮
-    assistant `tool_use` 的执行结果，按 `tool_use_id` 关联。
-    """
-    if not messages:
-        return []
-    last = messages[-1]
-    if last.role != "user" or not isinstance(last.content, list):
+def _anthropic_results_from_content(content: Any) -> list[dict[str, Any]]:
+    if not isinstance(content, list):
         return []
     results: list[dict[str, Any]] = []
-    for block in last.content:
+    for block in content:
         if not isinstance(block, dict) or block.get("type") != "tool_result":
             continue
         tool_use_id = block.get("tool_use_id")
@@ -121,6 +111,22 @@ def anthropic_tool_results(
     return results
 
 
+def anthropic_tool_results(
+    messages: list[AnthropicMessage],
+) -> list[dict[str, Any]]:
+    """从最近一轮 user 消息提取 `tool_result` block → Kiro toolResults。
+
+    Agent 回路中，客户端会在新一轮请求的最后一条 user 消息里携带上一轮
+    assistant `tool_use` 的执行结果，按 `tool_use_id` 关联。
+    """
+    if not messages:
+        return []
+    last = messages[-1]
+    if last.role != "user":
+        return []
+    return _anthropic_results_from_content(last.content)
+
+
 def _block_text(content: Any) -> str:
     """提取历史消息中的可读文本，不把结构化工具块重复写入内容。"""
     if isinstance(content, str):
@@ -134,48 +140,71 @@ def _block_text(content: Any) -> str:
     )
 
 
-def anthropic_tool_history(
-    messages: list[AnthropicMessage],
-) -> list[dict[str, Any]]:
-    """重建 Runtime 接受当前 toolResults 所需的活动工具历史。"""
-    results = anthropic_tool_results(messages)
-    result_ids = {item["toolUseId"] for item in results}
-    if not result_ids or len(messages) < 2:
+def _anthropic_tool_uses(content: Any) -> list[dict[str, Any]]:
+    if not isinstance(content, list):
         return []
-    assistant_index = len(messages) - 2
-    assistant = messages[assistant_index]
-    if assistant.role != "assistant" or not isinstance(assistant.content, list):
-        return []
-    tool_uses = [
+    return [
         {
             "toolUseId": block["id"],
             "name": block.get("name", ""),
             "input": block.get("input", {}),
         }
-        for block in assistant.content
+        for block in content
         if isinstance(block, dict)
         and block.get("type") == "tool_use"
-        and block.get("id") in result_ids
+        and block.get("id")
     ]
-    if {item["toolUseId"] for item in tool_uses} != result_ids:
+
+
+def anthropic_tool_history(
+    messages: list[AnthropicMessage],
+) -> list[dict[str, Any]]:
+    """重建 Runtime 接受当前 toolResults 所需的完整工具历史。"""
+    current_results = anthropic_tool_results(messages)
+    current_result_ids = {item["toolUseId"] for item in current_results}
+    if not current_result_ids or len(messages) < 2:
         return []
-    user_content = "."
-    if assistant_index > 0 and messages[assistant_index - 1].role == "user":
-        user_content = _block_text(messages[assistant_index - 1].content) or "."
-    return [
-        {
-            "userInputMessage": {
-                "content": user_content,
+    history: list[dict[str, Any]] = []
+    pending_tool_ids: set[str] = set()
+
+    # 最后一条 user 消息作为 currentMessage 的 toolResults 发送；之前的所有
+    # 工具往返都必须保留在 history，否则长 Agent 回路会遗失早期读取结果。
+    for message in messages[:-1]:
+        if message.role == "user":
+            results = _anthropic_results_from_content(message.content)
+            result_ids = {item["toolUseId"] for item in results}
+            if result_ids:
+                if result_ids != pending_tool_ids:
+                    return []
+            elif pending_tool_ids:
+                return []
+            payload: dict[str, Any] = {
+                "content": _block_text(message.content) or ".",
                 "origin": "AI_EDITOR",
             }
-        },
-        {
-            "assistantResponseMessage": {
-                "content": _block_text(assistant.content),
-                "toolUses": tool_uses,
+            if results:
+                payload["userInputMessageContext"] = {
+                    "toolResults": results,
+                }
+            history.append({"userInputMessage": payload})
+            pending_tool_ids = set()
+        elif message.role == "assistant":
+            if pending_tool_ids:
+                return []
+            tool_uses = _anthropic_tool_uses(message.content)
+            payload = {
+                "content": _block_text(message.content),
             }
-        },
-    ]
+            if tool_uses:
+                payload["toolUses"] = tool_uses
+                pending_tool_ids = {
+                    item["toolUseId"] for item in tool_uses
+                }
+            history.append({"assistantResponseMessage": payload})
+
+    if pending_tool_ids != current_result_ids:
+        return []
+    return history
 
 
 def openai_tool_results(messages: list[Message]) -> list[dict[str, Any]]:
@@ -203,21 +232,91 @@ def openai_tool_results(messages: list[Message]) -> list[dict[str, Any]]:
 
 
 def openai_tool_history(messages: list[Message]) -> list[dict[str, Any]]:
-    """重建 OpenAI 工具结果对应的 Runtime 活动工具历史。"""
-    results = openai_tool_results(messages)
-    result_ids = {item["toolUseId"] for item in results}
-    if not result_ids:
+    """重建 OpenAI 工具结果对应的 Runtime 完整工具历史。"""
+    current_results = openai_tool_results(messages)
+    current_result_ids = {item["toolUseId"] for item in current_results}
+    if not current_result_ids:
         return []
-    assistant_index = len(messages) - len(results) - 1
-    if assistant_index < 0:
+    history: list[dict[str, Any]] = []
+    pending_tool_ids: set[str] = set()
+    history_messages = messages[: -len(current_results)]
+    index = 0
+
+    while index < len(history_messages):
+        message = history_messages[index]
+        if message.role in {"system", "developer"}:
+            index += 1
+            continue
+        if message.role == "user":
+            if pending_tool_ids:
+                return []
+            history.append(
+                {
+                    "userInputMessage": {
+                        "content": _block_text(message.content) or ".",
+                        "origin": "AI_EDITOR",
+                    }
+                }
+            )
+        elif message.role == "assistant":
+            if pending_tool_ids:
+                return []
+            tool_uses = _openai_tool_uses(message)
+            payload: dict[str, Any] = {
+                "content": _block_text(message.content),
+            }
+            if tool_uses:
+                payload["toolUses"] = tool_uses
+                pending_tool_ids = {
+                    item["toolUseId"] for item in tool_uses
+                }
+            history.append({"assistantResponseMessage": payload})
+        elif message.role == "tool":
+            results: list[dict[str, Any]] = []
+            while (
+                index < len(history_messages)
+                and history_messages[index].role == "tool"
+            ):
+                tool_message = history_messages[index]
+                if tool_message.tool_call_id:
+                    results.append(
+                        {
+                            "toolUseId": tool_message.tool_call_id,
+                            "content": _result_content(
+                                tool_message.content
+                            ),
+                            "status": "success",
+                        }
+                    )
+                index += 1
+            result_ids = {item["toolUseId"] for item in results}
+            if not result_ids or result_ids != pending_tool_ids:
+                return []
+            history.append(
+                {
+                    "userInputMessage": {
+                        "content": ".",
+                        "origin": "AI_EDITOR",
+                        "userInputMessageContext": {
+                            "toolResults": results,
+                        },
+                    }
+                }
+            )
+            pending_tool_ids = set()
+            continue
+        index += 1
+
+    if pending_tool_ids != current_result_ids:
         return []
-    assistant = messages[assistant_index]
-    if assistant.role != "assistant":
-        return []
-    raw_calls = (assistant.model_extra or {}).get("tool_calls") or []
+    return history
+
+
+def _openai_tool_uses(message: Message) -> list[dict[str, Any]]:
+    raw_calls = (message.model_extra or {}).get("tool_calls") or []
     tool_uses: list[dict[str, Any]] = []
     for call in raw_calls:
-        if not isinstance(call, dict) or call.get("id") not in result_ids:
+        if not isinstance(call, dict) or not call.get("id"):
             continue
         function = call.get("function") or {}
         raw_input = function.get("arguments", {})
@@ -233,25 +332,7 @@ def openai_tool_history(messages: list[Message]) -> list[dict[str, Any]]:
                 "input": raw_input if isinstance(raw_input, dict) else {},
             }
         )
-    if {item["toolUseId"] for item in tool_uses} != result_ids:
-        return []
-    user_content = "."
-    if assistant_index > 0 and messages[assistant_index - 1].role == "user":
-        user_content = _block_text(messages[assistant_index - 1].content) or "."
-    return [
-        {
-            "userInputMessage": {
-                "content": user_content,
-                "origin": "AI_EDITOR",
-            }
-        },
-        {
-            "assistantResponseMessage": {
-                "content": _block_text(assistant.content),
-                "toolUses": tool_uses,
-            }
-        },
-    ]
+    return tool_uses
 
 
 class ToolCallAccumulator:
