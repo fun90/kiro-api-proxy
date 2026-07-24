@@ -43,6 +43,7 @@ class Settings:
     runtime_account_index: int | None
     runtime_endpoint: str
     transport_priority: tuple[str, ...]
+    default_context_window: int
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -104,6 +105,9 @@ class Settings:
                 item.strip()
                 for item in os.getenv("TRANSPORT_PRIORITY", "acp,cli").split(",")
                 if item.strip()
+            ),
+            default_context_window=int(
+                os.getenv("DEFAULT_CONTEXT_WINDOW", "200000")
             ),
         )
 

@@ -337,6 +337,7 @@ async def _events(
         _inflight_generations.add(fingerprint)
     started = time.perf_counter()
     first = True
+    saw_usage = False
     try:
         if not settings.incremental_streaming:
             try:
@@ -449,6 +450,8 @@ async def _events(
                             2,
                         ),
                     )
+                if event.type is EventType.USAGE:
+                    saw_usage = True
                 yield event
         finally:
             if next_event is not None and not next_event.done():
@@ -464,6 +467,12 @@ async def _events(
             model=generation.model,
             total_ms=round((time.perf_counter() - started) * 1000, 2),
         )
+        if not saw_usage:
+            _log(
+                "usage_missing",
+                transport=transport.name,
+                model=generation.model,
+            )
 
 
 async def _collect_generation(
@@ -1156,7 +1165,8 @@ async def models() -> dict[str, Any]:
                 "object": "model",
                 "created": 0,
                 "owned_by": "kiro",
-                "context_window": item.get("context_window_tokens"),
+                "context_window": item.get("context_window_tokens")
+                or settings.default_context_window,
             }
             for item in result
         ],

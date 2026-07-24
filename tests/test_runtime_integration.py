@@ -347,6 +347,37 @@ class TestRuntimeStreamFailAfterOutput:
 
 
 # ============================================================
+# 测试：上游不下发用量帧
+# ============================================================
+
+
+class TestRuntimeStreamNoUsage:
+    async def test_stream_without_usage_frame_emits_no_usage_event(self):
+        """上游只发文本/结束帧、无 usageEvent/contextUsageEvent 时，
+        Runtime 流不应凭空合成 USAGE 事件。
+
+        这条路径下客户端拿不到真实上下文占用，只能由 ensure_estimates 退回
+        字符级估算（偏保守、通常低于真实 tokenizer）。锁定该行为，既固定
+        当前偏低成因的边界，也避免未来误以为 Runtime 会自带用量统计。
+        """
+        rt = _make_runtime_transport()
+        frames = _text_frame("你好") + _text_frame("世界") + _done_frame()
+
+        mock_resp = AsyncMock()
+        mock_resp.status_code = 200
+        mock_resp.aiter_bytes = lambda: _async_iter([frames])
+
+        with patch.object(rt._client, "stream") as mock_stream:
+            mock_stream.return_value = _async_context(mock_resp)
+            events = [
+                e async for e in rt.stream(GenerationRequest("auto", "hi"))
+            ]
+
+        assert [e for e in events if e.type is EventType.USAGE] == []
+        assert any(e.type is EventType.DONE for e in events)
+
+
+# ============================================================
 # 测试：models 降级
 # ============================================================
 
