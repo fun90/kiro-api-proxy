@@ -252,6 +252,48 @@ class TestEventMapper:
         assert events[0].data["input_tokens"] == 100
         assert events[0].data["output_tokens"] == 50
 
+    def test_usage_event_merges_context_and_cache_fields(self):
+        msg = EventStreamMessage(
+            headers={":event-type": "usageEvent", ":message-type": "event"},
+            payload=json.dumps(
+                {
+                    "usage": {
+                        "inputTokens": 4100,
+                        "outputTokens": 50,
+                        "cachedReadTokens": 3900,
+                        "cachedWriteTokens": 20,
+                        "thoughtTokens": 10,
+                    },
+                    "used": 4096,
+                    "size": 200000,
+                }
+            ).encode(),
+        )
+        events = list(map_event(msg))
+        assert events[0].data == {
+            "input_tokens": 4100,
+            "output_tokens": 50,
+            "cache_read_input_tokens": 3900,
+            "cache_creation_input_tokens": 20,
+            "reasoning_tokens": 10,
+            "context_tokens": 4096,
+            "context_window": 200000,
+        }
+
+    def test_usage_event_does_not_invent_missing_zero_values(self):
+        msg = EventStreamMessage(
+            headers={
+                ":event-type": "contextUsageEvent",
+                ":message-type": "event",
+            },
+            payload=json.dumps({"used": 4096, "size": 200000}).encode(),
+        )
+        events = list(map_event(msg))
+        assert events[0].data == {
+            "context_tokens": 4096,
+            "context_window": 200000,
+        }
+
     def test_completion_event(self):
         msg = EventStreamMessage(
             headers={":event-type": "conversationTurnComplete", ":message-type": "event"},

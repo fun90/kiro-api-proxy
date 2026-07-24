@@ -32,6 +32,29 @@ logger = logging.getLogger(__name__)
 
 REST_ENDPOINT = "https://codewhisperer.us-east-1.amazonaws.com"
 STREAM_ENDPOINT = "https://q.us-east-1.amazonaws.com"
+
+
+def _context_window_tokens(model: dict[str, Any]) -> int | None:
+    """兼容不同区域/版本模型列表中的上下文窗口字段。"""
+    containers = [model]
+    for key in ("tokenLimits", "token_limits", "limits"):
+        value = model.get(key)
+        if isinstance(value, dict):
+            containers.append(value)
+    for container in containers:
+        for key in (
+            "contextWindowTokens",
+            "contextWindow",
+            "context_window_tokens",
+            "maxInputTokens",
+            "inputTokenLimit",
+        ):
+            value = container.get(key)
+            if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+                return value
+    return None
+
+
 KIRO_VERSION = "0.11.107"
 
 
@@ -165,11 +188,15 @@ class RuntimeTransport:
                 if isinstance(item, dict):
                     model_id = item.get("modelId", item.get("model_id", ""))
                     if model_id:
-                        models.append({
+                        context_window = _context_window_tokens(item)
+                        record = {
                             "model_id": model_id,
                             "name": item.get("modelName", item.get("name", model_id)),
                             "provider": item.get("provider", "kiro"),
-                        })
+                        }
+                        if context_window is not None:
+                            record["context_window_tokens"] = context_window
+                        models.append(record)
         return models
 
     async def stream(

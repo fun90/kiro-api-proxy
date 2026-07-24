@@ -60,6 +60,13 @@ def test_ensure_estimates_prefers_context_tokens_for_input():
     assert usage.output_tokens > 0
 
 
+def test_ensure_estimates_prefers_larger_context_over_turn_input():
+    usage = TokenUsage(input_tokens=12, context_tokens=4096)
+    usage.ensure_estimates("很短的提示", "输出")
+    # 持久会话的本轮输入不能覆盖累计上下文占用。
+    assert usage.input_tokens == 4096
+
+
 def test_ensure_estimates_falls_back_to_char_estimate():
     usage = TokenUsage()
     usage.ensure_estimates("你好世界", "输出")

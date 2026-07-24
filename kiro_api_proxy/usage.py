@@ -74,10 +74,13 @@ class TokenUsage:
         )
 
     def ensure_estimates(self, prompt: str, output: str) -> None:
-        if self.input_tokens <= 0:
-            # 上游未给出 input_tokens 时，优先采用其上报的真实上下文用量
-            # （usage_update 的 used），否则退回字符级估算。
-            self.input_tokens = self.context_tokens or estimate_tokens(prompt)
+        # 持久会话中的 input_tokens 可能只统计本轮新增输入，而
+        # context_tokens（usage_update.used）才是客户端需要展示的累计占用。
+        # 两者同时存在时取较大值；都缺失时才退回字符级估算。
+        if self.context_tokens > self.input_tokens:
+            self.input_tokens = self.context_tokens
+        elif self.input_tokens <= 0:
+            self.input_tokens = estimate_tokens(prompt)
         if self.output_tokens <= 0:
             self.output_tokens = estimate_tokens(output)
 

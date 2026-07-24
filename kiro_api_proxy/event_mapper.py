@@ -108,34 +108,49 @@ def map_event(message: EventStreamMessage) -> Iterator[GenerationEvent]:
             body = json.loads(message.payload) if message.payload else {}
         except (json.JSONDecodeError, ValueError):
             body = {}
-        # 提取 token 用量信息
-        usage_data: dict = {}
-        if "usage" in body:
-            usage_data = body["usage"]
-        elif "inputTokens" in body or "outputTokens" in body:
-            usage_data = body
-        if isinstance(usage_data, dict) and usage_data:
-            yield GenerationEvent(
-                type=EventType.USAGE,
-                data={
-                    "input_tokens": usage_data.get("inputTokens", 0),
-                    "output_tokens": usage_data.get("outputTokens", 0),
-                },
-            )
-        elif isinstance(usage_data, (int, float)):
-            yield GenerationEvent(
-                type=EventType.USAGE,
-                data={"credits": float(usage_data)},
-            )
-        elif "used" in body or "size" in body:
-            # contextUsageEvent：上下文占用（used）与窗口大小（size）
-            yield GenerationEvent(
-                type=EventType.USAGE,
-                data={
-                    "context_tokens": body.get("used", 0),
-                    "context_window": body.get("size", 0),
-                },
-            )
+        # usage 与 used/size 可能出现在同一个事件中，必须合并提取，不能
+        # 使用互斥分支。缺失字段也不能补 0，否则会覆盖先前收到的真实值。
+        raw_usage = body.get("usage")
+        sources = [raw_usage, body] if isinstance(raw_usage, dict) else [body]
+        usage_data: dict[str, int | float] = {}
+        fields = {
+            "input_tokens": ("inputTokens", "input_tokens"),
+            "output_tokens": ("outputTokens", "output_tokens"),
+            "cache_read_input_tokens": (
+                "cachedReadTokens",
+                "cached_read_tokens",
+                "cache_read_input_tokens",
+            ),
+            "cache_creation_input_tokens": (
+                "cachedWriteTokens",
+                "cached_write_tokens",
+                "cache_creation_input_tokens",
+            ),
+            "reasoning_tokens": (
+                "thoughtTokens",
+                "thought_tokens",
+                "reasoning_tokens",
+            ),
+            "context_tokens": ("used", "contextTokens", "context_tokens"),
+            "context_window": ("size", "contextWindow", "context_window"),
+        }
+        for target, aliases in fields.items():
+            for source in sources:
+                for alias in aliases:
+                    value = source.get(alias)
+                    if (
+                        isinstance(value, int)
+                        and not isinstance(value, bool)
+                        and value >= 0
+                    ):
+                        usage_data[target] = value
+                        break
+                if target in usage_data:
+                    break
+        if isinstance(raw_usage, (int, float)) and not isinstance(raw_usage, bool):
+            usage_data["credits"] = float(raw_usage)
+        if usage_data:
+            yield GenerationEvent(type=EventType.USAGE, data=usage_data)
         return
 
     # 补全/结束事件

@@ -19,7 +19,10 @@ from kiro_api_proxy.transports.base import (
     TransportError,
 )
 from kiro_api_proxy.transports.router import AdaptiveTransport
-from kiro_api_proxy.transports.runtime import RuntimeTransport
+from kiro_api_proxy.transports.runtime import (
+    RuntimeTransport,
+    _context_window_tokens,
+)
 
 
 # ============================================================
@@ -107,6 +110,18 @@ def _make_runtime_transport(settings=None):
     rt._token_provider.force_refresh = AsyncMock(return_value="refreshed-token")
     rt._client = httpx.AsyncClient()
     return rt
+
+
+@pytest.mark.parametrize(
+    ("model", "expected"),
+    [
+        ({"contextWindowTokens": 200000}, 200000),
+        ({"tokenLimits": {"maxInputTokens": 128000}}, 128000),
+        ({"modelId": "auto"}, None),
+    ],
+)
+def test_context_window_tokens_normalizes_model_metadata(model, expected):
+    assert _context_window_tokens(model) == expected
 
 
 # ============================================================

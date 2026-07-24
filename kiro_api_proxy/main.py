@@ -558,7 +558,9 @@ async def chat_stream(
     tool_results: list[dict[str, Any]] | None = None,
     history: list[dict[str, Any]] | None = None,
 ) -> AsyncIterator[str]:
-    usage = TokenUsage(input_tokens=estimate_tokens(prompt))
+    # 不预填本地估算值，否则上游随后上报的 context_tokens 无法在
+    # ensure_estimates 中成为 input_tokens，长会话会被严重低估。
+    usage = TokenUsage()
     output_parts: list[str] = []
     tool_index: dict[str, int] = {}
     try:
@@ -856,7 +858,8 @@ async def responses_stream(
     history = openai_tool_history(messages)
     if tool_results and not history:
         tool_results = []
-    usage = TokenUsage(input_tokens=estimate_tokens(prompt))
+    # 等流结束后再决定是否估算，优先采用上游的真实上下文用量。
+    usage = TokenUsage()
 
     def event(name: str, payload: dict[str, Any]) -> str:
         return (

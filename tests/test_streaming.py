@@ -67,6 +67,30 @@ async def test_chat_stream_includes_requested_usage(monkeypatch):
     ] == 2
 
 
+async def test_chat_stream_prefers_context_usage_over_prompt_estimate(monkeypatch):
+    async def usage_events(*args, **kwargs):
+        yield GenerationEvent(EventType.TEXT_DELTA, text="你好")
+        yield GenerationEvent(
+            EventType.USAGE,
+            data={"context_tokens": 4096, "context_window": 200000},
+        )
+        yield GenerationEvent(EventType.DONE)
+
+    monkeypatch.setattr(main, "_events", usage_events)
+    chunks = [
+        chunk
+        async for chunk in main.chat_stream(
+            "auto",
+            "很短的提示",
+            "chatcmpl-test",
+            1,
+            include_usage=True,
+        )
+    ]
+    usage_chunk = json.loads(chunks[-2].removeprefix("data: "))
+    assert usage_chunk["usage"]["prompt_tokens"] == 4096
+
+
 async def test_anthropic_stream_is_incremental(monkeypatch):
     monkeypatch.setattr(main, "_events", _fake_events)
     request = main.AnthropicRequest(
@@ -181,6 +205,25 @@ async def test_responses_stream_is_incremental(monkeypatch):
     completed = json.loads(chunks[-2].split("data: ", 1)[1])
     assert completed["response"]["usage"]["input_tokens"] > 0
     assert completed["response"]["usage"]["output_tokens"] > 0
+
+
+async def test_responses_stream_prefers_context_usage_over_prompt_estimate(
+    monkeypatch,
+):
+    async def usage_events(*args, **kwargs):
+        yield GenerationEvent(EventType.TEXT_DELTA, text="你好")
+        yield GenerationEvent(
+            EventType.USAGE,
+            data={"context_tokens": 8192, "context_window": 200000},
+        )
+        yield GenerationEvent(EventType.DONE)
+
+    monkeypatch.setattr(main, "_events", usage_events)
+    request = main.ResponsesRequest(model="auto", input="很短的提示", stream=True)
+    chunks = [chunk async for chunk in main.responses_stream(request)]
+    completed = next(chunk for chunk in chunks if "response.completed" in chunk)
+    payload = json.loads(completed.split("data: ", 1)[1])
+    assert payload["response"]["usage"]["input_tokens"] == 8192
 
 
 async def test_stream_error_is_encoded(monkeypatch):
