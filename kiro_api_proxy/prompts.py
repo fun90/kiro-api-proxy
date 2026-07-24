@@ -29,13 +29,10 @@ def content_text(content: str | list[dict[str, Any]] | None) -> str:
             output.append(str(part.get("text", "")))
         elif part_type == "image_url":
             output.append(f"[图片：{part.get('image_url')}]")
-        elif part_type == "tool_use":
-            # 工具调用改由结构化 toolSpecification/toolResults 通道处理，
-            # 这里仅保留可读上下文，避免原始 JSON 噪声混入 prompt。
-            arguments = json.dumps(part.get("input", {}), ensure_ascii=False)
-            output.append(f"[调用工具 {part.get('name', '')}({arguments})]")
-        elif part_type == "tool_result":
-            output.append(f"[工具结果 {content_text(part.get('content'))}]")
+        elif part_type in {"tool_use", "tool_result"}:
+            # 工具调用与结果由结构化 history/toolResults 通道传递。把它们写入
+            # prompt 会为模型提供可模仿的伪工具语法，导致工具调用退化成普通文本。
+            continue
         else:
             output.append(json.dumps(part, ensure_ascii=False))
     return "\n".join(output)
@@ -49,12 +46,20 @@ def messages_to_prompt(messages: list[Message]) -> str:
         "assistant": "助手",
         "tool": "工具结果",
     }
-    sections = [
-        f"### {labels[item.role]}"
-        f"{f'（{item.name}）' if item.name else ''}\n"
-        f"{content_text(item.content)}"
-        for item in messages
-    ]
+    sections: list[str] = []
+    for item in messages:
+        # OpenAI 的 role=tool 消息也由结构化 toolResults 通道传递。
+        if item.role == "tool":
+            continue
+        text = content_text(item.content)
+        # 工具专用消息去除结构化块后为空，不应留下可干扰模型的空角色段。
+        if not text:
+            continue
+        sections.append(
+            f"### {labels[item.role]}"
+            f"{f'（{item.name}）' if item.name else ''}\n"
+            f"{text}"
+        )
     return (
         f"所有面向用户的自然语言必须使用{settings.response_language}，包括计划、"
         "分析摘要、进度说明、工具调用前后说明和最终答复；"
