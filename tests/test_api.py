@@ -62,7 +62,13 @@ async def test_root_supports_head():
 
 async def test_chat(monkeypatch):
     async def fake_events(
-        model, prompt, effort=None, client_request=None, session_id=None
+        model,
+        prompt,
+        effort=None,
+        client_request=None,
+        session_id=None,
+        tools=None,
+        tool_results=None,
     ):
         assert model == "auto"
         assert "### 用户\n你好" in prompt
@@ -97,7 +103,13 @@ async def test_chat(monkeypatch):
 
 async def test_responses(monkeypatch):
     async def fake_events(
-        model, prompt, effort=None, client_request=None, session_id=None
+        model,
+        prompt,
+        effort=None,
+        client_request=None,
+        session_id=None,
+        tools=None,
+        tool_results=None,
     ):
         yield GenerationEvent(EventType.TEXT_DELTA, text="OK")
         yield GenerationEvent(
@@ -123,7 +135,13 @@ async def test_responses(monkeypatch):
 
 async def test_anthropic_messages(monkeypatch):
     async def fake_events(
-        model, prompt, effort=None, client_request=None, session_id=None
+        model,
+        prompt,
+        effort=None,
+        client_request=None,
+        session_id=None,
+        tools=None,
+        tool_results=None,
     ):
         assert model == "claude-sonnet-5-thinking"
         assert "### 系统指令\n使用中文" in prompt
@@ -164,7 +182,13 @@ async def test_anthropic_messages(monkeypatch):
 
 async def test_anthropic_system_role_in_messages(monkeypatch):
     async def fake_events(
-        model, prompt, effort=None, client_request=None, session_id=None
+        model,
+        prompt,
+        effort=None,
+        client_request=None,
+        session_id=None,
+        tools=None,
+        tool_results=None,
     ):
         assert "### 系统指令\n系统消息" in prompt
         yield GenerationEvent(EventType.TEXT_DELTA, text="OK")

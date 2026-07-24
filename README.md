@@ -251,8 +251,14 @@ systemctl --user restart kiro-api-proxy.service
 
 ## 兼容边界
 
-- 暂不转换 OpenAI `tools`/`tool_calls`；可通过 `KIRO_TRUST_TOOLS` 控制 Kiro 自身工具。
-- Claude API 支持文本消息、system、Thinking 映射及 SSE；工具块会作为文本上下文传给 Kiro，不返回原生 `tool_use`。
+- 支持原生工具调用（function calling）：解析 Anthropic `tools` 与 OpenAI
+  `tools`，将客户端工具定义转换为 Kiro `toolSpecification`，并把上游
+  `toolUseEvent` 映射为原生 `tool_use`（Anthropic，`stop_reason: tool_use`）
+  与 `tool_calls`（OpenAI，`finish_reason: tool_calls`），流式与非流式均支持。
+  客户端回填的 `tool_result`/`role:tool` 结果按工具调用 ID 关联为 Kiro
+  `toolResults`，支撑 Claude Code 等 Agent 的多步工具回路。工具由客户端执行，
+  代理只透传调用与结果；`KIRO_TRUST_TOOLS` 仅控制 Kiro 自身的 agent 工具。
+- Claude API 支持文本消息、system、Thinking 映射、原生工具调用及 SSE。
 - Anthropic 流式响应优先使用 ACP 提供的 token 统计：`message_delta`
   回传真实的 `input_tokens`、缓存与 `output_tokens`，供客户端准确计算
   会话上下文占用；上游未提供时优先采用其上报的上下文用量（`used`），

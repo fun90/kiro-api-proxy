@@ -29,6 +29,13 @@ def content_text(content: str | list[dict[str, Any]] | None) -> str:
             output.append(str(part.get("text", "")))
         elif part_type == "image_url":
             output.append(f"[图片：{part.get('image_url')}]")
+        elif part_type == "tool_use":
+            # 工具调用改由结构化 toolSpecification/toolResults 通道处理，
+            # 这里仅保留可读上下文，避免原始 JSON 噪声混入 prompt。
+            arguments = json.dumps(part.get("input", {}), ensure_ascii=False)
+            output.append(f"[调用工具 {part.get('name', '')}({arguments})]")
+        elif part_type == "tool_result":
+            output.append(f"[工具结果 {content_text(part.get('content'))}]")
         else:
             output.append(json.dumps(part, ensure_ascii=False))
     return "\n".join(output)

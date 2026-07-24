@@ -217,6 +217,20 @@ class RuntimeTransport:
             )
         url = f"{base}/generateAssistantResponse"
 
+        user_input_message: dict[str, Any] = {
+            "content": request.prompt,
+            "modelId": request.model,
+            "origin": "AI_EDITOR",
+        }
+        # 结构化工具契约：填充客户端工具规格与历史工具结果。
+        context: dict[str, Any] = {}
+        if request.tools:
+            context["tools"] = request.tools
+        if request.tool_results:
+            context["toolResults"] = request.tool_results
+        if context:
+            user_input_message["userInputMessageContext"] = context
+
         body = {
             "conversationState": {
                 "agentContinuationId": str(uuid.uuid4()),
@@ -224,15 +238,18 @@ class RuntimeTransport:
                 "chatTriggerType": "MANUAL",
                 "conversationId": request.session_id or str(uuid.uuid4()),
                 "currentMessage": {
-                    "userInputMessage": {
-                        "content": request.prompt,
-                        "modelId": request.model,
-                        "origin": "AI_EDITOR",
-                    },
+                    "userInputMessage": user_input_message,
                 },
             },
             "profileArn": self._profile_arn,
         }
+        if request.history:
+            for item in request.history:
+                user_message = item.get("userInputMessage")
+                if user_message is not None:
+                    user_message.setdefault("modelId", request.model)
+                    user_message.setdefault("origin", "AI_EDITOR")
+            body["conversationState"]["history"] = request.history
 
         headers = self._headers(token, runtime=False)
 

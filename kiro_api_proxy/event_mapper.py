@@ -70,31 +70,37 @@ def map_event(message: EventStreamMessage) -> Iterator[GenerationEvent]:
             yield GenerationEvent(type=EventType.THINKING_DELTA, text=text)
         return
 
-    # 工具使用 → 文本化输出
+    # 工具使用 → 结构化 TOOL 事件（分片：起始 / input 片段 / stop）
     if event_type in ("toolUseEvent", "toolUseBlockStart", "toolUseBlockDelta"):
         try:
             body = json.loads(message.payload) if message.payload else {}
         except (json.JSONDecodeError, ValueError):
             return
-        # 将工具名和参数作为文本输出
-        tool_name = body.get("name", body.get("toolName", ""))
-        tool_input = body.get("input", body.get("parameters", ""))
-        if tool_name:
-            text = f"[Tool: {tool_name}]"
-            if tool_input:
-                input_str = (
-                    json.dumps(tool_input, ensure_ascii=False)
-                    if isinstance(tool_input, (dict, list))
-                    else str(tool_input)
-                )
-                text += f" {input_str}"
-            yield GenerationEvent(type=EventType.TEXT_DELTA, text=text)
+        tool_id = body.get("toolUseId", body.get("id", ""))
+        if not tool_id:
+            return
+        tool_input = body.get("input", "")
+        # input 可能是字符串片段或结构化对象；统一为 JSON 文本片段拼接
+        if isinstance(tool_input, (dict, list)):
+            tool_input = json.dumps(tool_input, ensure_ascii=False)
+        elif tool_input is None:
+            tool_input = ""
+        yield GenerationEvent(
+            type=EventType.TOOL,
+            data={
+                "id": tool_id,
+                "name": body.get("name", body.get("toolName", "")),
+                "input": str(tool_input),
+                "stop": bool(body.get("stop", False)),
+            },
+        )
         return
 
     # 用量/计量事件
     if event_type in (
         "usageEvent",
         "meteringEvent",
+        "contextUsageEvent",
         "contentBlockStop",
         "messageStop",
     ):
@@ -120,6 +126,15 @@ def map_event(message: EventStreamMessage) -> Iterator[GenerationEvent]:
             yield GenerationEvent(
                 type=EventType.USAGE,
                 data={"credits": float(usage_data)},
+            )
+        elif "used" in body or "size" in body:
+            # contextUsageEvent：上下文占用（used）与窗口大小（size）
+            yield GenerationEvent(
+                type=EventType.USAGE,
+                data={
+                    "context_tokens": body.get("used", 0),
+                    "context_window": body.get("size", 0),
+                },
             )
         return
 

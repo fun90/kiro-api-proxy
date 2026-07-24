@@ -33,6 +33,16 @@ from .schemas import (
     Message,
     ResponsesRequest,
 )
+from .tools import (
+    ToolCallAccumulator,
+    anthropic_tool_history,
+    anthropic_tool_results,
+    anthropic_tools_to_specs,
+    openai_tool_history,
+    openai_tool_results,
+    openai_tools_to_specs,
+    parse_tool_input,
+)
 from .transports import (
     AdaptiveTransport,
     CliTransport,
@@ -190,6 +200,9 @@ def _generation_request(
     prompt: str,
     effort_override: str | None = None,
     session_id: str | None = None,
+    tools: list[dict[str, Any]] | None = None,
+    tool_results: list[dict[str, Any]] | None = None,
+    history: list[dict[str, Any]] | None = None,
 ) -> GenerationRequest:
     upstream_model, model_effort = resolve_model(model)
     requested_effort = normalize_effort(effort_override)
@@ -200,6 +213,9 @@ def _generation_request(
         effort,
         session_id,
         prompt_working_directory(prompt),
+        tools or [],
+        tool_results or [],
+        history or [],
     )
 
 
@@ -291,8 +307,13 @@ async def _events(
     effort: str | None,
     client_request: Request | None = None,
     session_id: str | None = None,
+    tools: list[dict[str, Any]] | None = None,
+    tool_results: list[dict[str, Any]] | None = None,
+    history: list[dict[str, Any]] | None = None,
 ) -> AsyncIterator[GenerationEvent]:
-    generation = _generation_request(model, prompt, effort, session_id)
+    generation = _generation_request(
+        model, prompt, effort, session_id, tools, tool_results, history
+    )
     await ensure_model(generation.model)
     fingerprint = hashlib.sha256(
         "\0".join(
@@ -451,17 +472,28 @@ async def _collect_generation(
     effort: str | None,
     client_request: Request | None = None,
     session_id: str | None = None,
-) -> tuple[str, TokenUsage]:
-    """消费 _events 累积完整文本与真实用量，供非流式端点复用。
+    tools: list[dict[str, Any]] | None = None,
+    tool_results: list[dict[str, Any]] | None = None,
+    history: list[dict[str, Any]] | None = None,
+) -> tuple[str, TokenUsage, list[dict[str, str]]]:
+    """消费 _events 累积完整文本、真实用量与工具调用，供非流式端点复用。
 
     上游提供 token 统计时直接采用，否则由 ensure_estimates 回退估算，
     从而让非流式响应也回传准确的上下文用量。
     """
     usage = TokenUsage()
     parts: list[str] = []
-    async for event in _events(model, prompt, effort, client_request, session_id):
+    tool_calls = ToolCallAccumulator()
+    event_args = (
+        (model, prompt, effort, client_request, session_id, tools, tool_results, history)
+        if history
+        else (model, prompt, effort, client_request, session_id, tools, tool_results)
+    )
+    async for event in _events(*event_args):
         if event.type is EventType.TEXT_DELTA:
             parts.append(event.text)
+        elif event.type is EventType.TOOL:
+            tool_calls.add(event.data)
         elif event.type is EventType.USAGE:
             usage.update(event.data)
         elif event.type is EventType.ERROR:
@@ -474,7 +506,7 @@ async def _collect_generation(
             )
     content = "".join(parts).strip()
     usage.ensure_estimates(prompt, content)
-    return content, usage
+    return content, usage, tool_calls.calls()
 
 
 def chat_chunk(
@@ -485,8 +517,13 @@ def chat_chunk(
     finish_reason: str | None = None,
     usage: dict[str, Any] | None = None,
     usage_only: bool = False,
+    tool_calls: list[dict[str, Any]] | None = None,
 ) -> str:
-    delta = {"content": content} if content is not None else {}
+    delta: dict[str, Any] = {}
+    if content is not None:
+        delta["content"] = content
+    if tool_calls is not None:
+        delta["tool_calls"] = tool_calls
     payload = {
         "id": completion_id,
         "object": "chat.completion.chunk",
@@ -517,16 +554,74 @@ async def chat_stream(
     client_request: Request | None = None,
     session_id: str | None = None,
     include_usage: bool = False,
+    tools: list[dict[str, Any]] | None = None,
+    tool_results: list[dict[str, Any]] | None = None,
+    history: list[dict[str, Any]] | None = None,
 ) -> AsyncIterator[str]:
     usage = TokenUsage(input_tokens=estimate_tokens(prompt))
     output_parts: list[str] = []
+    tool_index: dict[str, int] = {}
     try:
-        async for event in _events(
-            model, prompt, reasoning_effort, client_request, session_id
-        ):
+        event_args = (
+            (
+                model,
+                prompt,
+                reasoning_effort,
+                client_request,
+                session_id,
+                tools,
+                tool_results,
+                history,
+            )
+            if history
+            else (
+                model,
+                prompt,
+                reasoning_effort,
+                client_request,
+                session_id,
+                tools,
+                tool_results,
+            )
+        )
+        async for event in _events(*event_args):
             if event.type is EventType.TEXT_DELTA:
                 output_parts.append(event.text)
                 yield chat_chunk(completion_id, created, model, event.text)
+            elif event.type is EventType.TOOL:
+                data = event.data
+                tool_id = data.get("id", "")
+                if tool_id not in tool_index:
+                    index = len(tool_index)
+                    tool_index[tool_id] = index
+                    yield chat_chunk(
+                        completion_id,
+                        created,
+                        model,
+                        tool_calls=[
+                            {
+                                "index": index,
+                                "id": tool_id,
+                                "type": "function",
+                                "function": {
+                                    "name": data.get("name", ""),
+                                    "arguments": "",
+                                },
+                            }
+                        ],
+                    )
+                if data.get("input"):
+                    yield chat_chunk(
+                        completion_id,
+                        created,
+                        model,
+                        tool_calls=[
+                            {
+                                "index": tool_index[tool_id],
+                                "function": {"arguments": data["input"]},
+                            }
+                        ],
+                    )
             elif event.type is EventType.USAGE:
                 usage.update(event.data)
             elif event.type is EventType.ERROR:
@@ -534,7 +629,12 @@ async def chat_stream(
                 yield f"data: {json.dumps(error, ensure_ascii=False)}\n\n"
                 break
         else:
-            yield chat_chunk(completion_id, created, model, finish_reason="stop")
+            yield chat_chunk(
+                completion_id,
+                created,
+                model,
+                finish_reason="tool_calls" if tool_index else "stop",
+            )
             if include_usage:
                 usage.ensure_estimates(prompt, "".join(output_parts))
                 yield chat_chunk(
@@ -567,6 +667,11 @@ async def anthropic_stream(
     prompt = messages_to_prompt(anthropic_to_messages(request))
     if working_directory:
         prompt = f"Working directory: {working_directory}\n\n{prompt}"
+    tools = anthropic_tools_to_specs(request.tools)
+    tool_results = anthropic_tool_results(request.messages)
+    history = anthropic_tool_history(request.messages)
+    if tool_results and not history:
+        tool_results = []
     usage = TokenUsage()
     input_estimate = estimate_tokens(prompt)
     yield anthropic_event(
@@ -590,33 +695,116 @@ async def anthropic_stream(
             },
         },
     )
-    yield anthropic_event(
-        "content_block_start",
-        {
-            "type": "content_block_start",
-            "index": 0,
-            "content_block": {"type": "text", "text": ""},
-        },
-    )
     output_parts: list[str] = []
+    # 块状态机：文本块与 tool_use 块按到达顺序分配 index，交错时先关闭再开启。
+    next_index = 0
+    open_kind: str | None = None  # None | "text" | "tool"
+    open_index = -1
+    open_tool_id: str | None = None
+    saw_tool = False
+
+    def close_open() -> str | None:
+        nonlocal open_kind, open_tool_id
+        if open_kind is None:
+            return None
+        payload = anthropic_event(
+            "content_block_stop",
+            {"type": "content_block_stop", "index": open_index},
+        )
+        open_kind = None
+        open_tool_id = None
+        return payload
+
     try:
-        async for event in _events(
-            anthropic_upstream_model(request),
-            prompt,
-            None,
-            client_request,
-            session_id,
-        ):
+        event_args = (
+            (
+                anthropic_upstream_model(request),
+                prompt,
+                None,
+                client_request,
+                session_id,
+                tools,
+                tool_results,
+                history,
+            )
+            if history
+            else (
+                anthropic_upstream_model(request),
+                prompt,
+                None,
+                client_request,
+                session_id,
+                tools,
+                tool_results,
+            )
+        )
+        async for event in _events(*event_args):
             if event.type is EventType.TEXT_DELTA:
                 output_parts.append(event.text)
+                if open_kind != "text":
+                    closed = close_open()
+                    if closed:
+                        yield closed
+                    open_index = next_index
+                    next_index += 1
+                    open_kind = "text"
+                    yield anthropic_event(
+                        "content_block_start",
+                        {
+                            "type": "content_block_start",
+                            "index": open_index,
+                            "content_block": {"type": "text", "text": ""},
+                        },
+                    )
                 yield anthropic_event(
                     "content_block_delta",
                     {
                         "type": "content_block_delta",
-                        "index": 0,
+                        "index": open_index,
                         "delta": {"type": "text_delta", "text": event.text},
                     },
                 )
+            elif event.type is EventType.TOOL:
+                data = event.data
+                tool_id = data.get("id", "")
+                if open_kind != "tool" or open_tool_id != tool_id:
+                    closed = close_open()
+                    if closed:
+                        yield closed
+                    open_index = next_index
+                    next_index += 1
+                    open_kind = "tool"
+                    open_tool_id = tool_id
+                    saw_tool = True
+                    yield anthropic_event(
+                        "content_block_start",
+                        {
+                            "type": "content_block_start",
+                            "index": open_index,
+                            "content_block": {
+                                "type": "tool_use",
+                                "id": tool_id,
+                                "name": data.get("name", ""),
+                                "input": {},
+                            },
+                        },
+                    )
+                if data.get("input"):
+                    yield anthropic_event(
+                        "content_block_delta",
+                        {
+                            "type": "content_block_delta",
+                            "index": open_index,
+                            "delta": {
+                                "type": "input_json_delta",
+                                "partial_json": data["input"],
+                            },
+                        },
+                    )
+                if data.get("stop"):
+                    closed = close_open()
+                    if closed:
+                        yield closed
             elif event.type is EventType.USAGE:
                 usage.update(event.data)
             elif event.type is EventType.ERROR:
@@ -638,14 +826,17 @@ async def anthropic_stream(
         )
         return
     usage.ensure_estimates(prompt, "".join(output_parts))
-    yield anthropic_event(
-        "content_block_stop", {"type": "content_block_stop", "index": 0}
-    )
+    closed = close_open()
+    if closed:
+        yield closed
     yield anthropic_event(
         "message_delta",
         {
             "type": "message_delta",
-            "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+            "delta": {
+                "stop_reason": "tool_use" if saw_tool else "end_turn",
+                "stop_sequence": None,
+            },
             "usage": usage.anthropic(),
         },
     )
@@ -659,6 +850,12 @@ async def responses_stream(
 ) -> AsyncIterator[str]:
     response_id = f"resp_{uuid.uuid4().hex}"
     prompt = messages_to_prompt(responses_to_messages(request))
+    messages = responses_to_messages(request)
+    tools = openai_tools_to_specs(request.tools)
+    tool_results = openai_tool_results(messages)
+    history = openai_tool_history(messages)
+    if tool_results and not history:
+        tool_results = []
     usage = TokenUsage(input_tokens=estimate_tokens(prompt))
 
     def event(name: str, payload: dict[str, Any]) -> str:
@@ -720,13 +917,30 @@ async def responses_stream(
     )
     sequence = 0
     text_parts: list[str] = []
-    async for item in _events(
-        request.model,
-        prompt,
-        request.reasoning_effort,
-        client_request,
-        session_id,
-    ):
+    tool_calls = ToolCallAccumulator()
+    event_args = (
+        (
+            request.model,
+            prompt,
+            request.reasoning_effort,
+            client_request,
+            session_id,
+            tools,
+            tool_results,
+            history,
+        )
+        if history
+        else (
+            request.model,
+            prompt,
+            request.reasoning_effort,
+            client_request,
+            session_id,
+            tools,
+            tool_results,
+        )
+    )
+    async for item in _events(*event_args):
         if item.type is EventType.TEXT_DELTA:
             sequence += 1
             text_parts.append(item.text)
@@ -741,6 +955,8 @@ async def responses_stream(
                     "sequence_number": sequence,
                 },
             )
+        elif item.type is EventType.TOOL:
+            tool_calls.add(item.data)
         elif item.type is EventType.USAGE:
             usage.update(item.data)
         elif item.type is EventType.ERROR:
@@ -802,6 +1018,63 @@ async def responses_stream(
             },
         },
     )
+    for offset, call in enumerate(tool_calls.calls(), start=1):
+        fc_id = f"fc_{uuid.uuid4().hex}"
+        arguments = call["input"] or "{}"
+        yield event(
+            "response.output_item.added",
+            {
+                "type": "response.output_item.added",
+                "response_id": response_id,
+                "output_index": offset,
+                "item": {
+                    "id": fc_id,
+                    "type": "function_call",
+                    "status": "in_progress",
+                    "call_id": call["id"],
+                    "name": call["name"],
+                    "arguments": "",
+                },
+            },
+        )
+        sequence += 1
+        yield event(
+            "response.function_call_arguments.delta",
+            {
+                "type": "response.function_call_arguments.delta",
+                "response_id": response_id,
+                "item_id": fc_id,
+                "output_index": offset,
+                "delta": arguments,
+                "sequence_number": sequence,
+            },
+        )
+        yield event(
+            "response.function_call_arguments.done",
+            {
+                "type": "response.function_call_arguments.done",
+                "response_id": response_id,
+                "item_id": fc_id,
+                "output_index": offset,
+                "arguments": arguments,
+            },
+        )
+        yield event(
+            "response.output_item.done",
+            {
+                "type": "response.output_item.done",
+                "response_id": response_id,
+                "output_index": offset,
+                "item": {
+                    "id": fc_id,
+                    "type": "function_call",
+                    "status": "completed",
+                    "call_id": call["id"],
+                    "name": call["name"],
+                    "arguments": arguments,
+                },
+            },
+        )
     yield event(
         "response.completed",
         {
@@ -899,6 +1172,11 @@ async def chat(request: ChatRequest, raw_request: Request, response: Response):
     external_id, session_key = _session_context(raw_request)
     _set_session_headers(response, external_id)
     prompt = messages_to_prompt(request.messages)
+    tools = openai_tools_to_specs(request.tools)
+    tool_results = openai_tool_results(request.messages)
+    history = openai_tool_history(request.messages)
+    if tool_results and not history:
+        tool_results = []
     completion_id = f"chatcmpl-{uuid.uuid4().hex}"
     created = int(time.time())
     if request.stream:
@@ -915,17 +1193,38 @@ async def chat(request: ChatRequest, raw_request: Request, response: Response):
                     request.stream_options
                     and request.stream_options.get("include_usage")
                 ),
+                tools,
+                tool_results,
+                history,
             ),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
-    content, usage = await _collect_generation(
+    content, usage, tool_calls = await _collect_generation(
         request.model,
         prompt,
         request.reasoning_effort,
         raw_request,
         session_key,
+        tools,
+        tool_results,
+        history,
     )
+    message: dict[str, Any] = {"role": "assistant", "content": content or None}
+    finish_reason = "stop"
+    if tool_calls:
+        message["tool_calls"] = [
+            {
+                "id": call["id"],
+                "type": "function",
+                "function": {
+                    "name": call["name"],
+                    "arguments": call["input"] or "{}",
+                },
+            }
+            for call in tool_calls
+        ]
+        finish_reason = "tool_calls"
     return {
         "id": completion_id,
         "object": "chat.completion",
@@ -934,8 +1233,8 @@ async def chat(request: ChatRequest, raw_request: Request, response: Response):
         "choices": [
             {
                 "index": 0,
-                "message": {"role": "assistant", "content": content},
-                "finish_reason": "stop",
+                "message": message,
+                "finish_reason": finish_reason,
             }
         ],
         "usage": usage.chat_completions(),
@@ -954,32 +1253,52 @@ async def responses(
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
-    prompt = messages_to_prompt(responses_to_messages(request))
-    content, usage = await _collect_generation(
+    messages = responses_to_messages(request)
+    prompt = messages_to_prompt(messages)
+    tool_results = openai_tool_results(messages)
+    history = openai_tool_history(messages)
+    if tool_results and not history:
+        tool_results = []
+    content, usage, tool_calls = await _collect_generation(
         request.model,
         prompt,
         request.reasoning_effort,
         raw_request,
         session_key,
+        openai_tools_to_specs(request.tools),
+        tool_results,
+        history,
     )
     response_id = f"resp_{uuid.uuid4().hex}"
+    output: list[dict[str, Any]] = [
+        {
+            "id": f"msg_{uuid.uuid4().hex}",
+            "type": "message",
+            "status": "completed",
+            "role": "assistant",
+            "content": [
+                {"type": "output_text", "text": content, "annotations": []}
+            ],
+        }
+    ]
+    for call in tool_calls:
+        output.append(
+            {
+                "id": f"fc_{uuid.uuid4().hex}",
+                "type": "function_call",
+                "status": "completed",
+                "call_id": call["id"],
+                "name": call["name"],
+                "arguments": call["input"] or "{}",
+            }
+        )
     return {
         "id": response_id,
         "object": "response",
         "created_at": int(time.time()),
         "status": "completed",
         "model": request.model,
-        "output": [
-            {
-                "id": f"msg_{uuid.uuid4().hex}",
-                "type": "message",
-                "status": "completed",
-                "role": "assistant",
-                "content": [
-                    {"type": "output_text", "text": content, "annotations": []}
-                ],
-            }
-        ],
+        "output": output,
         "output_text": content,
         "usage": usage.responses(),
     }
@@ -1008,20 +1327,41 @@ async def anthropic_messages(
     prompt = messages_to_prompt(anthropic_to_messages(request))
     if working_directory:
         prompt = f"Working directory: {working_directory}\n\n{prompt}"
-    content, usage = await _collect_generation(
+    tool_results = anthropic_tool_results(request.messages)
+    history = anthropic_tool_history(request.messages)
+    if tool_results and not history:
+        tool_results = []
+    content, usage, tool_calls = await _collect_generation(
         anthropic_upstream_model(request),
         prompt,
         None,
         raw_request,
         session_key,
+        anthropic_tools_to_specs(request.tools),
+        tool_results,
+        history,
     )
+    blocks: list[dict[str, Any]] = []
+    if content:
+        blocks.append({"type": "text", "text": content})
+    for call in tool_calls:
+        blocks.append(
+            {
+                "type": "tool_use",
+                "id": call["id"],
+                "name": call["name"],
+                "input": parse_tool_input(call["input"]),
+            }
+        )
+    if not blocks:
+        blocks.append({"type": "text", "text": ""})
     return {
         "id": message_id,
         "type": "message",
         "role": "assistant",
         "model": request.model,
-        "content": [{"type": "text", "text": content}],
-        "stop_reason": "end_turn",
+        "content": blocks,
+        "stop_reason": "tool_use" if tool_calls else "end_turn",
         "stop_sequence": None,
         "usage": usage.anthropic(),
     }

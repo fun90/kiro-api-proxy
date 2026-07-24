@@ -190,15 +190,56 @@ class TestEventMapper:
         assert events[0].type.value == "thinking_delta"
         assert events[0].text == "let me think..."
 
-    def test_tool_use_text_delta(self):
+    def test_tool_use_structured_event(self):
+        # 起始分片：仅 name + toolUseId
+        start = EventStreamMessage(
+            headers={":event-type": "toolUseEvent", ":message-type": "event"},
+            payload=json.dumps(
+                {"name": "get_weather", "toolUseId": "tuse_1"}
+            ).encode(),
+        )
+        events = list(map_event(start))
+        assert len(events) == 1
+        assert events[0].type.value == "tool"
+        assert events[0].data == {
+            "id": "tuse_1",
+            "name": "get_weather",
+            "input": "",
+            "stop": False,
+        }
+
+        # input 分片
+        delta = EventStreamMessage(
+            headers={":event-type": "toolUseEvent", ":message-type": "event"},
+            payload=json.dumps(
+                {"input": '{"city": "北', "name": "get_weather", "toolUseId": "tuse_1"}
+            ).encode(),
+        )
+        events = list(map_event(delta))
+        assert events[0].type.value == "tool"
+        assert events[0].data["input"] == '{"city": "北'
+        assert events[0].data["stop"] is False
+
+        # 结束分片
+        stop = EventStreamMessage(
+            headers={":event-type": "toolUseEvent", ":message-type": "event"},
+            payload=json.dumps(
+                {"name": "get_weather", "stop": True, "toolUseId": "tuse_1"}
+            ).encode(),
+        )
+        events = list(map_event(stop))
+        assert events[0].data["stop"] is True
+
+    def test_tool_use_object_input_serialized(self):
         msg = EventStreamMessage(
             headers={":event-type": "toolUseEvent", ":message-type": "event"},
-            payload=json.dumps({"name": "read_file", "input": {"path": "/foo"}}).encode(),
+            payload=json.dumps(
+                {"name": "read_file", "input": {"path": "/foo"}, "toolUseId": "t1"}
+            ).encode(),
         )
         events = list(map_event(msg))
-        assert len(events) == 1
-        assert events[0].type.value == "text_delta"
-        assert "read_file" in events[0].text
+        assert events[0].type.value == "tool"
+        assert json.loads(events[0].data["input"]) == {"path": "/foo"}
 
     def test_usage_event(self):
         msg = EventStreamMessage(

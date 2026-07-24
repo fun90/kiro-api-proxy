@@ -70,6 +70,13 @@ def _done_frame() -> bytes:
     )
 
 
+def _tool_frame(payload: dict) -> bytes:
+    return _build_frame(
+        {":event-type": "toolUseEvent", ":message-type": "event"},
+        json.dumps(payload).encode(),
+    )
+
+
 # ============================================================
 # Fixtures
 # ============================================================
@@ -144,6 +151,114 @@ class TestRuntimeStreamSuccess:
             result = await rt.generate(GenerationRequest("auto", "hi"))
 
         assert result == "part1part2"
+
+
+# ============================================================
+# 测试：结构化工具契约
+# ============================================================
+
+
+class TestRuntimeTools:
+    async def test_request_body_includes_tools_and_results(self):
+        rt = _make_runtime_transport()
+        frames = _text_frame("ok") + _done_frame()
+        mock_resp = AsyncMock()
+        mock_resp.status_code = 200
+        mock_resp.aiter_bytes = lambda: _async_iter([frames])
+
+        tools = [
+            {
+                "toolSpecification": {
+                    "name": "get_weather",
+                    "description": "查询天气",
+                    "inputSchema": {"json": {"type": "object", "properties": {}}},
+                }
+            }
+        ]
+        tool_results = [
+            {"toolUseId": "t1", "content": [{"text": "晴"}], "status": "success"}
+        ]
+        request = GenerationRequest(
+            "auto",
+            "hi",
+            tools=tools,
+            tool_results=tool_results,
+            history=[
+                {
+                    "userInputMessage": {
+                        "content": "天气？",
+                        "origin": "AI_EDITOR",
+                    }
+                },
+                {
+                    "assistantResponseMessage": {
+                        "content": "",
+                        "toolUses": [
+                            {
+                                "toolUseId": "t1",
+                                "name": "get_weather",
+                                "input": {"city": "北京"},
+                            }
+                        ],
+                    }
+                },
+            ],
+        )
+
+        with patch.object(rt._client, "stream") as mock_stream:
+            mock_stream.return_value = _async_context(mock_resp)
+            _ = [e async for e in rt.stream(request)]
+
+        context = mock_stream.call_args.kwargs["json"]["conversationState"][
+            "currentMessage"
+        ]["userInputMessage"]["userInputMessageContext"]
+        assert context["tools"] == tools
+        assert context["toolResults"] == tool_results
+        history = mock_stream.call_args.kwargs["json"]["conversationState"]["history"]
+        assert history[-1]["assistantResponseMessage"]["toolUses"][0][
+            "toolUseId"
+        ] == "t1"
+        assert history[0]["userInputMessage"]["modelId"] == "auto"
+
+    async def test_request_body_omits_context_without_tools(self):
+        rt = _make_runtime_transport()
+        frames = _text_frame("ok") + _done_frame()
+        mock_resp = AsyncMock()
+        mock_resp.status_code = 200
+        mock_resp.aiter_bytes = lambda: _async_iter([frames])
+
+        with patch.object(rt._client, "stream") as mock_stream:
+            mock_stream.return_value = _async_context(mock_resp)
+            _ = [e async for e in rt.stream(GenerationRequest("auto", "hi"))]
+
+        user_message = mock_stream.call_args.kwargs["json"]["conversationState"][
+            "currentMessage"
+        ]["userInputMessage"]
+        assert "userInputMessageContext" not in user_message
+
+    async def test_tool_use_event_decoded_as_tool(self):
+        rt = _make_runtime_transport()
+        frames = (
+            _tool_frame({"name": "get_weather", "toolUseId": "t1"})
+            + _tool_frame({"input": '{"city":', "name": "get_weather", "toolUseId": "t1"})
+            + _tool_frame({"input": ' "北京"}', "name": "get_weather", "toolUseId": "t1"})
+            + _tool_frame({"name": "get_weather", "stop": True, "toolUseId": "t1"})
+            + _done_frame()
+        )
+        mock_resp = AsyncMock()
+        mock_resp.status_code = 200
+        mock_resp.aiter_bytes = lambda: _async_iter([frames])
+
+        with patch.object(rt._client, "stream") as mock_stream:
+            mock_stream.return_value = _async_context(mock_resp)
+            events = [e async for e in rt.stream(GenerationRequest("auto", "hi"))]
+
+        tool_events = [e for e in events if e.type is EventType.TOOL]
+        assert len(tool_events) == 4
+        assert all(e.data["id"] == "t1" for e in tool_events)
+        combined = "".join(e.data["input"] for e in tool_events)
+        assert json.loads(combined) == {"city": "北京"}
+        assert tool_events[-1].data["stop"] is True
 
 
 # ============================================================
