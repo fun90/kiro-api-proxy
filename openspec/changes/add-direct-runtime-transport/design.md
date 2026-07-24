@@ -1,151 +1,112 @@
 ## Context
 
-当前代理已经通过统一的 `KiroTransport` 接口支持一次性 CLI 和常驻 ACP，
-但 `RuntimeTransport` 始终返回协议错误。模型发现还固定委托给 CLI，因此即使
+当前代理通过统一的 `KiroTransport` 接口支持一次性 CLI 和常驻 ACP，
+但 `RuntimeTransport` 始终返回协议错误。模型发现固定委托给 CLI，即使
 补全生成方法，也不能完成无 CLI 启动。
 
-Kiro-Go 证明了另一条链路：使用 AWS OIDC 或 Kiro Social Refresh Token
-换取 Access Token，以 Bearer Token 调用区域化的 Kiro/Amazon Q/
-CodeWhisperer 数据面，并解析 AWS Binary Event Stream。该链路可消除二进制
-依赖和进程管理开销，但端点、请求体与客户端标识均不是 Kiro 官方承诺的公共
-HTTP API，必须视为可关闭、可降级的实验传输。
+Kiro-Go 证明了另一条链路：使用 AWS OIDC Refresh Token 换取 Access Token，
+以 Bearer Token 调用区域化 Kiro 数据面，解析 AWS Binary Event Stream。
+该链路可消除二进制依赖和进程管理开销，但端点、请求体与客户端标识不是 Kiro
+官方承诺的公共 API，必须视为可关闭、可降级的实验传输。
 
-现有外部 OpenAI/Anthropic API、`GenerationRequest`、`GenerationEvent`
-和自适应路由是稳定边界，应复用而非复制 Kiro-Go 的完整代理层。
+现有 `GenerationRequest`（`prompt: str`）、`GenerationEvent` 和自适应路由
+是稳定边界。`RuntimeTransport` 只需将 `request.prompt` 整体作为当前消息
+发送，不需要解析结构化多轮消息，从而避免扩展接口或逆解析 prompt。
 
 ## Goals / Non-Goals
 
 **Goals:**
 
-- 在未安装 `kiro-cli` 时，凭有效 Kiro 凭据完成模型发现和流式/非流式生成。
-- 支持 OIDC/Builder ID 与 Social 两类 Refresh Token 刷新，并正确区分认证
-  区域和 Profile 数据面区域。
-- 将 Kiro 请求和 AWS Event Stream 隔离在 Runtime 模块内，对上继续使用
+- 在未安装 `kiro-cli` 时，凭有效凭据完成模型发现和流式生成。
+- 支持单一凭据类型（OIDC/Builder ID）的 Refresh Token 自动刷新。
+- 将 Kiro 请求和 Event Stream 隔离在 Runtime 模块内，对上继续使用
   `GenerationRequest` 与 `GenerationEvent`。
-- 保持 Runtime 默认关闭，失败时按照现有路由语义降级至 ACP/CLI。
-- 对凭据、协议边界、超时、取消和错误分类提供可测试且可观测的实现。
+- 保持 Runtime 默认关闭，失败时按现有路由语义降级至 ACP/CLI。
 
 **Non-Goals:**
 
-- 不承诺私有 Kiro 数据面是官方支持或长期稳定的公共 API。
-- 不实现 Web 管理面板、多账号池、自动注册批量账号或规避额度限制。
-- 不从 Kiro CLI 二进制中抓取或解密用户凭据。
-- 不改变现有 OpenAI/Anthropic 对外请求和响应契约。
-- 首期不移除 ACP/CLI，也不默认启用 Runtime。
+- 不同时支持 OIDC 和 Social 两种凭据；只实现实际使用的类型。
+- 不实现多端点容错或自动 Profile ARN 发现。
+- 不扩展 `GenerationRequest` 的消息结构。
+- 不实现结构化工具调用传递（工具事件转为文本或跳过）。
+- 不实现原子文件替换或并发读写安全（单实例场景）。
+- 不默认启用 Runtime，不移除 ACP/CLI。
 
 ## Decisions
 
-### 1. 以模块化 Python 客户端补全 `RuntimeTransport`
+### 1. prompt 直接作为 currentMessage
 
-新增凭据模型、Token Provider、Payload Codec、Event Stream Decoder 和
-Runtime HTTP Client，`RuntimeTransport` 仅负责编排并转换统一事件。这样认证
-刷新和二进制协议可以独立测试，也避免把私有协议扩散到 `main.py`。
+`GenerationRequest.prompt` 是 API handler 已序列化的完整 prompt 文本。
+RuntimeTransport 将其整体放入 Kiro `conversationState.currentMessage.content`，
+历史消息为空。这牺牲了多轮会话 token 优化（上游可能多消耗 token），但避免
+扩展 Protocol 接口和逆解析 prompt。
 
-备选方案是直接移植 Kiro-Go 服务或从 Python 调用 Go sidecar。该方案会形成
-第二套 API、配置和生命周期，破坏当前传输抽象，因此不采用。
+备选方案是扩展 `GenerationRequest` 增加 `messages` 字段，但这会改变
+KiroTransport Protocol 契约，影响 CLI/ACP 传输，不值得为实验传输引入。
 
-### 2. 凭据通过显式文件加载，环境变量仅用于单值覆盖
+### 2. 凭据文件手动配置
 
-凭据文件包含 `auth_method`、`refresh_token`、OIDC Client ID/Secret、
-认证区域、Profile ARN 和可选 Access Token/过期时间。程序要求文件为普通文件，
-在 POSIX 上拒绝组或其他用户可读写的权限，并禁止在日志、异常或健康接口中输出
-Token。Access Token 只在内存中刷新；Refresh Token 轮换时通过原子替换持久化，
-同时保留最小化的失败恢复。
+凭据通过 JSON 文件加载，包含 `refresh_token`、`client_id`、`client_secret`、
+`auth_region`、`profile_arn` 和可选的 `access_token`/`expires_at`。
 
-不直接读取 Kiro 内部 SQLite 或账户管理器文件，因为格式和加密策略不稳定，也
-容易扩大凭据访问范围。可以后续增加显式导入命令，但运行时只消费本项目格式。
+Profile ARN 直接写在凭据文件里（从 Kiro-Go 配置或 AWS Console 获取），
+不自动调用 `ListAvailableProfiles`。启动时权限检查仅 warning 不阻断。
 
-### 3. Token Provider 使用单航班刷新
+### 3. 单航班 Token 刷新 + 文件回写
 
-当 Access Token 缺失或距离过期不足安全窗口时，按账户加锁，只允许一个刷新
-请求；等待者复用结果。OIDC 使用
-`https://oidc.<auth-region>.amazonaws.com/token`，Social 使用受配置约束的
-Kiro Refresh Token 端点。刷新返回新 Refresh Token 时必须轮换保存。
+Access Token 缺失或过期时，使用 `asyncio.Lock` 保证只有一个刷新请求。
+OIDC 刷新调用 `https://oidc.<auth-region>.amazonaws.com/token`。刷新后
+直接覆盖写入凭据文件（单实例不需要原子替换）。
 
-401 只触发一次强制刷新和请求重放；403、402 和第二次 401 不重试，避免循环和
-重复计费。
+首次 401 在未输出内容时强制刷新并重放一次；第二次 401 或已输出后不重试。
 
-### 4. 数据面区域以 Profile ARN 优先
+### 4. 单端点固定配置
 
-认证区域只用于 OIDC。生成和 REST 模型请求优先从
-`arn:<partition>:codewhisperer:<region>:...:profile/...` 解析数据面区域；
-缺失时使用显式 Runtime 区域，最后才回退 `us-east-1`。非 `us-east-1`
-数据面使用 `q.<region>.amazonaws.com`。
+配置一个 `RUNTIME_ENDPOINT`，默认从 Profile ARN 解析区域构造端点 URL
+（`codewhisperer.<region>.amazonaws.com` 或 `q.<region>.amazonaws.com`）。
+不做端点回退、不做多端点探测。连接错误和 5xx 由 AdaptiveTransport 降级到
+ACP/CLI 处理。
 
-Profile ARN 优先从凭据读取，其次调用 `ListAvailableProfiles`，最后使用刷新
-响应中的 `profileArn`。解析结果在内存和凭据文件中缓存。
+### 5. 增量解码 AWS Event Stream
 
-### 5. 端点容错受配置和错误类别约束
-
-首期支持 Kiro Q、CodeWhisperer 和 Amazon Q 三种兼容端点，但默认只使用一个
-明确配置的主端点；只有开启端点回退时才按顺序尝试其他端点。连接错误、超时、
-429 和 5xx 可尝试下一端点；认证、授权、付费和请求校验错误必须立即返回。
-
-这种策略比无条件在 429 后切换更保守，避免把同一额度问题误判成独立容量。
-
-### 6. 请求转换保留完整客户端上下文
-
-`GenerationRequest` 的消息被映射为 Kiro `conversationState`：最后一条用户
-消息进入 `currentMessage`，之前消息进入 `history`，模型映射保持与现有
-`resolve_model` 一致。系统提示通过可识别的 priming history 表达。
-
-结构化工具仅保留一个合法的活动工具回合；不匹配的历史工具调用和结果降级为
-文本，避免上游拒绝。首期若现有 `GenerationRequest` 尚未承载图片或结构化工具，
-Codec 保留扩展点，但不得伪造已支持的对外能力。
-
-### 7. 严格增量解码 AWS Event Stream
-
-解码器按 12 字节 Prelude、Header、Payload 和尾部 CRC 增量读取，设置最大帧
-大小，并校验 Prelude CRC 与 Message CRC。事件映射如下：
+解码器按 12 字节 Prelude、Header、Payload 和尾部 CRC 增量读取，校验
+Prelude CRC 和 Message CRC，设置帧大小上限。事件映射：
 
 - `assistantResponseEvent` → `TEXT_DELTA`
 - `reasoningContentEvent` → `THINKING_DELTA`
-- `toolUseEvent` → 工具事件或兼容文本
+- `toolUseEvent` → 跳过或转为 `TEXT_DELTA` 文本
 - metering/token usage → `USAGE`
 - 正常 EOF → `DONE`
-- 上游异常帧 → 分类后的 `ERROR`
+- 上游异常帧 → `ERROR`
 
-解码器不得缓存完整响应；客户端取消必须关闭 HTTP 响应流并传播至传输层。
+不缓存完整响应；客户端取消关闭 HTTP 响应流。
 
-### 8. 模型发现不再强制绑定 CLI
+### 6. models() 按传输优先级遍历
 
-`AdaptiveTransport.models()` 按可用传输顺序调用支持模型发现的传输，并使用与
-生成相同的熔断和错误分类；Runtime 调用区域化 `ListAvailableModels`。仅当
-Runtime 不可用时才降级到 CLI，从而支持真正无 CLI 启动。
+改造 `AdaptiveTransport.models()` 不再硬编码找 CLI，改为按优先级遍历
+可用传输调用 `models()`，复用现有 `_available()` 熔断检查。Runtime
+调用 `ListAvailableModels` 获取模型列表。
+
+### 7. 工具事件简单处理
+
+`toolUseEvent` 收到时转为 `TEXT_DELTA`（将工具名和参数 JSON 作为文本输出），
+不实现结构化 `TOOL` 事件传递。后续如果项目支持原生 tool_calls 再扩展。
 
 ## Risks / Trade-offs
 
-- [私有端点或 Payload 发生变化] → Runtime 默认关闭；记录不含敏感信息的协议
-  错误；保留 ACP/CLI 回退和独立协议测试夹具。
-- [模拟客户端标识可能触发服务条款或风控] → 文档明确非官方性质，不隐藏
-  `X-Kiro-Transport: runtime` 的本地可观测信息，不提供批量账号或额度规避能力。
-- [Refresh Token 泄漏] → 权限校验、原子写入、日志字段拒绝列表和异常脱敏；
-  测试确保任何响应与日志不包含凭据。
-- [401 重试导致重复请求] → 仅在尚未收到响应事件时重放一次；流已开始后直接
-  终止并报告错误。
-- [Event Stream 帧损坏或恶意长度] → CRC、长度上下界和事件负载大小校验。
-- [Runtime 与 ACP 语义不完全一致] → 统一在 `GenerationEvent` 边界归一化，
-  并以契约测试对两种传输运行相同场景。
-- [新增 HTTP 依赖增加连接资源] → 使用单个生命周期管理的异步客户端、连接池
-  上限和明确的 connect/read/total timeout。
+- [私有端点变化] → Runtime 默认关闭 + ACP/CLI 回退 + 协议测试夹具。
+- [prompt 整体发送浪费 token] → 个人使用可接受；大模型上下文窗口足够。
+- [单端点无容错] → 依赖 AdaptiveTransport 整体降级到 ACP/CLI。
+- [Token 泄漏] → 日志中截断显示 `token[:8]...`；个人机器风险可控。
+- [Event Stream 帧损坏] → CRC 校验 + 帧大小上限；损坏即终止流。
+- [凭据文件并发写入] → 单实例单并发，不存在竞争。
 
 ## Migration Plan
 
-1. 增加配置、凭据模型和纯单元测试，不改变默认传输。
-2. 实现认证、区域/Profile 解析和模型发现，在模拟上游下验收。
-3. 实现 Payload 与 Event Stream，并完成流式、取消、错误和重试测试。
-4. 在测试账号上设置 `RUNTIME_ENABLED=true`、`TRANSPORT_PRIORITY=runtime,acp,cli`
-   进行灰度，比较模型列表、首字时间、输出、用量和工具事件。
-5. 验证稳定后才允许无 CLI 部署使用 `TRANSPORT_PRIORITY=runtime`。
+1. 增加配置和凭据加载，跑通单元测试。
+2. 实现 Token 刷新和 Event Stream 解码器。
+3. 实现 HTTP 客户端、models() 和 stream()。
+4. 替换 RuntimeTransport 占位，集成到 AdaptiveTransport。
+5. 设置 `RUNTIME_ENABLED=true`、`TRANSPORT_PRIORITY=runtime,acp,cli` 验证。
 
-回滚只需设置 `RUNTIME_ENABLED=false` 并重启服务；凭据文件可以保留但不再读取。
-若 Runtime 协议异常，运行时熔断自动把请求交给 ACP/CLI。
-
-## Open Questions
-
-- Kiro 官方 `KIRO_API_KEY` 是否最终会提供可直接交换数据面 Access Token 的
-  公共流程；在公开前不纳入首期。
-- Kiro Social Refresh Token 端点是否存在区域化或版本化约束，需要在真实账号
-  灰度中确认。
-- `toolUseEvent` 是否应扩展现有公共 `GenerationEvent` 类型以原生输出工具调用，
-  还是首期维持当前文本兼容边界。
+回滚只需 `RUNTIME_ENABLED=false` 并重启。

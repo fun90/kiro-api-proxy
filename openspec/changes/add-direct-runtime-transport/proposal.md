@@ -7,28 +7,26 @@ ACP/CLI 回退能力的同时支持真正的无 CLI 部署。
 
 ## What Changes
 
-- 实现 Kiro OIDC、Builder ID 与 Social 凭据的加载、刷新和 Profile ARN
-  解析，不再依赖 `kiro-cli whoami` 获取运行时身份。
-- 直接调用区域化的 Kiro、Amazon Q Developer 与 CodeWhisperer 数据面，
-  支持模型发现、生成请求和端点容错。
-- 将现有 OpenAI/Anthropic 消息转换为 Kiro `conversationState` 请求，
-  覆盖历史消息、Thinking、图片、工具定义和工具结果。
-- 增量解析 AWS Binary Event Stream，并转换为现有
-  `GenerationEvent` 文本、思考、工具、用量、完成和错误事件。
-- 将直连 Runtime 接入现有自适应路由，支持 `runtime,acp,cli` 优先级以及
-  按错误类别安全降级。
-- 增加凭据脱敏、文件权限校验、日志过滤和运行时开关；默认不开启私有数据面
-  传输，避免无意改变现有部署行为。
-- 补充协议单元测试、模拟上游集成测试和直连/降级验证文档。
+- 从 JSON 凭据文件加载 OIDC Refresh Token，实现单航班自动刷新和文件
+  回写，不依赖 `kiro-cli` 获取运行时身份。
+- 将 `GenerationRequest.prompt` 整体作为 Kiro `currentMessage` 发送，
+  使用 Bearer Token 调用配置的单一数据面端点。
+- 增量解析 AWS Binary Event Stream（CRC 校验、帧大小上限），转换为
+  `GenerationEvent` 文本、思考、用量、完成和错误事件；工具事件文本化输出。
+- 实现 `ListAvailableModels` 调用，改造 `AdaptiveTransport.models()` 按
+  传输优先级遍历，支持无 CLI 启动。
+- 将直连 Runtime 接入现有自适应路由，支持 `runtime,acp,cli` 优先级配置
+  和首次 401 刷新重放。
+- Runtime 默认关闭，失败时安全降级到 ACP/CLI，不改变现有部署行为。
 
 ## Capabilities
 
 ### New Capabilities
 
-- `direct-runtime-auth`: 无 CLI 场景下的 Kiro 凭据加载、OIDC/Social Token
-  刷新、Profile ARN 解析及敏感信息保护。
-- `direct-runtime-generation`: Kiro 私有数据面的区域路由、模型发现、请求
-  转换、AWS Event Stream 解码及生成事件输出。
+- `direct-runtime-auth`: 无 CLI 场景下的凭据加载、OIDC Token 自动刷新、
+  单航班并发合并及首次 401 重放。
+- `direct-runtime-generation`: 单端点数据面调用、模型发现、prompt 直传、
+  AWS Event Stream 解码及 GenerationEvent 输出。
 
 ### Modified Capabilities
 

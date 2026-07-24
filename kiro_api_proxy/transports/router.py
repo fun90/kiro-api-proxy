@@ -71,12 +71,21 @@ class AdaptiveTransport:
             self._open_until[item.name] = time.monotonic() + self.cooldown_seconds
 
     async def models(self) -> list[dict[str, Any]]:
-        # 模型发现始终使用最稳定的 CLI 传输，ACP 未定义模型列表方法。
-        cli = next(
-            (item for item in self.transports if item.name == "cli"),
-            self.transports[-1],
-        )
-        return await cli.models()
+        # 按传输优先级遍历，复用熔断检查；失败时降级到下一个。
+        last_error: Exception | None = None
+        for item in self.transports:
+            if not self._available(item):
+                continue
+            try:
+                result = await item.models()
+                self._success(item)
+                return result
+            except Exception as exc:
+                self._failure(item)
+                last_error = exc
+        if last_error:
+            raise last_error
+        raise TransportError("没有可用传输提供模型列表", ErrorCategory.CAPACITY)
 
     async def generate(self, request: GenerationRequest) -> str:
         last_error: TransportError | None = None

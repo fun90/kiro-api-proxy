@@ -31,6 +31,205 @@ cp .env.example .env
 
 服务启动后可访问 `http://127.0.0.1:3458/docs` 查看接口文档。
 
+## 本机部署（systemd 用户服务）
+
+以下步骤适用于使用 systemd 的 Linux 桌面或服务器。服务安装到用户目录，
+无需 root 权限，默认只监听 `127.0.0.1:3458`。
+
+### 1. 安装程序
+
+```bash
+mkdir -p "$HOME/.local/share/kiro-api-proxy"
+git clone https://github.com/fun90/kiro-api-proxy.git \
+  "$HOME/.local/share/kiro-api-proxy/app"
+cd "$HOME/.local/share/kiro-api-proxy/app"
+
+python -m venv "$HOME/.local/share/kiro-api-proxy/venv"
+"$HOME/.local/share/kiro-api-proxy/venv/bin/pip" install -e .
+```
+
+### 2. 创建代理密钥
+
+```bash
+mkdir -p "$HOME/.config/kiro-api-proxy"
+openssl rand -hex 32 > "$HOME/.config/kiro-api-proxy/api-key"
+chmod 600 "$HOME/.config/kiro-api-proxy/api-key"
+```
+
+复制环境配置：
+
+```bash
+cp .env.example "$HOME/.config/kiro-api-proxy/proxy.env"
+```
+
+至少修改以下配置：
+
+```dotenv
+PROXY_API_KEY_FILE=/home/你的用户名/.config/kiro-api-proxy/api-key
+KIRO_WORKING_DIRECTORY=/home/你的用户名
+```
+
+systemd 的 `EnvironmentFile` 不会展开 `$HOME` 或 `~`，因此
+`proxy.env` 中的文件路径必须填写绝对路径。
+
+### 3. 配置直连 Runtime
+
+Runtime 支持两种凭据来源。
+
+方式一：使用独立凭据文件。复制示例并填入自己的 Kiro OIDC 凭据：
+
+```bash
+cp credentials.example.json \
+  "$HOME/.config/kiro-api-proxy/runtime-credentials.json"
+chmod 600 "$HOME/.config/kiro-api-proxy/runtime-credentials.json"
+```
+
+然后在 `proxy.env` 中配置：
+
+```dotenv
+RUNTIME_ENABLED=true
+RUNTIME_CREDENTIALS_FILE=/home/你的用户名/.config/kiro-api-proxy/runtime-credentials.json
+RUNTIME_ACCOUNT_INDEX=
+TRANSPORT_PRIORITY=runtime,acp,cli
+```
+
+方式二：复用 Kiro Account Manager 的账户文件。先查看可用账号及其零基索引，
+命令不会输出 Token 或 Client Secret：
+
+```bash
+jq 'to_entries
+  | map(select(.value.enabled == true and .value.status == "active"))
+  | map({
+      index: .key,
+      label: (.value.label // .value.email // ""),
+      provider: .value.provider,
+      region: .value.region,
+      has_profile: (.value.profileArn != null and .value.profileArn != "")
+    })' \
+  "$HOME/.local/share/.kiro-account-manager/accounts.json"
+```
+
+收紧账户文件权限：
+
+```bash
+chmod 600 "$HOME/.local/share/.kiro-account-manager/accounts.json"
+```
+
+在 `proxy.env` 中填写账户文件绝对路径和选中的索引：
+
+```dotenv
+RUNTIME_ENABLED=true
+RUNTIME_CREDENTIALS_FILE=/home/你的用户名/.local/share/.kiro-account-manager/accounts.json
+RUNTIME_ACCOUNT_INDEX=填写上一步显示的索引
+TRANSPORT_PRIORITY=runtime,acp,cli
+```
+
+`runtime,acp,cli` 表示优先直连 Runtime，失败时回退到 ACP/CLI。若希望验证
+完全不依赖 CLI，可临时使用 `TRANSPORT_PRIORITY=runtime`；确认无误后建议恢复
+带回退的配置。
+
+### 4. 安装 systemd 服务
+
+```bash
+mkdir -p "$HOME/.config/systemd/user"
+```
+
+创建 `~/.config/systemd/user/kiro-api-proxy.service`：
+
+```ini
+[Unit]
+Description=Kiro OpenAI 与 Anthropic 兼容 API 代理
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/kiro-api-proxy/proxy.env
+WorkingDirectory=%h/.local/share/kiro-api-proxy/app
+ExecStart=%h/.local/share/kiro-api-proxy/venv/bin/uvicorn kiro_api_proxy.main:app --host 127.0.0.1 --port 3458
+Restart=on-failure
+RestartSec=2
+KillMode=control-group
+TimeoutStopSec=10
+
+[Install]
+WantedBy=default.target
+```
+
+加载并启动：
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now kiro-api-proxy.service
+systemctl --user status kiro-api-proxy.service --no-pager
+```
+
+如需在用户未登录时也启动服务，可由管理员执行：
+
+```bash
+sudo loginctl enable-linger "$USER"
+```
+
+### 5. 验证部署
+
+检查健康状态：
+
+```bash
+curl -fsS http://127.0.0.1:3458/health
+```
+
+验证模型发现和真实生成：
+
+```bash
+PROXY_API_KEY="$(<"$HOME/.config/kiro-api-proxy/api-key")"
+
+curl -fsS http://127.0.0.1:3458/v1/models \
+  -H "Authorization: Bearer $PROXY_API_KEY"
+
+curl -fsS http://127.0.0.1:3458/v1/chat/completions \
+  -H "Authorization: Bearer $PROXY_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "claude-sonnet-4.6",
+    "messages": [{"role": "user", "content": "只回复 RUNTIME_OK"}]
+  }'
+```
+
+确认生成请求实际使用 Runtime：
+
+```bash
+journalctl --user -u kiro-api-proxy.service --since "5 minutes ago" \
+  --no-pager | grep '"transport": "runtime"'
+```
+
+预期日志包含 `first_token` 事件和 `"transport": "runtime"`。如果指定账号
+返回 `MONTHLY_REQUEST_COUNT`，请选择另一个仍有可用额度的活动账号并更新
+`RUNTIME_ACCOUNT_INDEX`。
+
+### 6. 更新与回滚
+
+更新代码并重启：
+
+```bash
+cd "$HOME/.local/share/kiro-api-proxy/app"
+git pull --ff-only
+"$HOME/.local/share/kiro-api-proxy/venv/bin/pip" install -e .
+systemctl --user restart kiro-api-proxy.service
+```
+
+若 Runtime 私有协议发生变化，在 `proxy.env` 中设置：
+
+```dotenv
+RUNTIME_ENABLED=false
+TRANSPORT_PRIORITY=acp,cli
+```
+
+然后执行：
+
+```bash
+systemctl --user restart kiro-api-proxy.service
+```
+
 ## 接口
 
 - `GET /`
@@ -64,7 +263,9 @@ cp .env.example .env
 - OpenAI Chat Completions 在 `stream_options.include_usage=true` 时于
   `[DONE]` 前返回最终用量 chunk；Responses 流的 `response.completed`
   也包含输入、输出、缓存、推理和总 token 用量。
-- Kiro 尚未公开直接 Runtime API 契约；项目不逆向私有接口，`RuntimeTransport` 默认关闭并安全降级。
+- Kiro 尚未公开直接 Runtime API 契约；`RuntimeTransport` 基于逆向
+  观察实现，默认关闭并安全降级到 ACP/CLI。端点或协议变化时只需
+  `RUNTIME_ENABLED=false` 即可回滚。
 
 ## 配置
 
@@ -98,8 +299,18 @@ cp .env.example .env
   `200000`。
 - `SESSION_COMPACTION_RATIO`：当前完整 Prompt 小于上一轮该比例时，
   视为客户端已压缩上下文并轮换 ACP 会话，默认 `0.7`。
-- `RUNTIME_ENABLED`：直接 Runtime 实验开关，默认且当前必须为 `false`。
-- `TRANSPORT_PRIORITY`：传输优先级，推荐 `acp,cli`。
+- `RUNTIME_ENABLED`：直接 Runtime 传输，默认 `false`。启用前需配置
+  `RUNTIME_CREDENTIALS_FILE` 指向包含 OIDC 凭据的 JSON 文件。
+- `RUNTIME_CREDENTIALS_FILE`：Runtime 凭据 JSON 文件路径（含
+  `refresh_token`、`client_id`、`client_secret`、`auth_region`、
+  `profile_arn`）。也可直接指向 Kiro Account Manager 的账户数组文件。
+  格式参见 `credentials.example.json`。
+- `RUNTIME_ACCOUNT_INDEX`：凭据文件为账户数组时，指定要使用的零基账号
+  索引；普通凭据对象留空。
+- `RUNTIME_ENDPOINT`：可选端点覆盖；留空时从 `profile_arn` 区域自动
+  构造 `https://codewhisperer.<region>.amazonaws.com`。
+- `TRANSPORT_PRIORITY`：传输优先级，推荐 `acp,cli`；启用 Runtime 后
+  可设为 `runtime,acp,cli`。
 
 Kiro 子进程会按以下顺序构造 `PATH`：`KIRO_EXTRA_PATH`、当前项目的
 `.venv/bin` / `venv/bin` / `node_modules/.bin`、常见用户工具目录

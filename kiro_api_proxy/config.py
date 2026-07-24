@@ -39,6 +39,9 @@ class Settings:
     session_max_context_chars: int
     session_compaction_ratio: float
     runtime_enabled: bool
+    runtime_credentials_file: str
+    runtime_account_index: int | None
+    runtime_endpoint: str
     transport_priority: tuple[str, ...]
 
     @classmethod
@@ -90,6 +93,13 @@ class Settings:
                 os.getenv("SESSION_COMPACTION_RATIO", "0.7")
             ),
             runtime_enabled=_bool("RUNTIME_ENABLED", False),
+            runtime_credentials_file=os.getenv("RUNTIME_CREDENTIALS_FILE", ""),
+            runtime_account_index=(
+                int(os.environ["RUNTIME_ACCOUNT_INDEX"])
+                if os.getenv("RUNTIME_ACCOUNT_INDEX", "").strip()
+                else None
+            ),
+            runtime_endpoint=os.getenv("RUNTIME_ENDPOINT", ""),
             transport_priority=tuple(
                 item.strip()
                 for item in os.getenv("TRANSPORT_PRIORITY", "acp,cli").split(",")
