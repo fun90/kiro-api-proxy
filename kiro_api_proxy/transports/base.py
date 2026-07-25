@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-import os
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from enum import StrEnum
-from pathlib import Path
 from typing import Any, Protocol
 
 
@@ -59,52 +57,6 @@ class GenerationRequest:
     # Runtime 活动工具轮次的历史消息。最后一条 assistantResponseMessage
     # 必须包含与 tool_results 对应的 toolUses，否则上游会返回 HTTP 400。
     history: list[dict[str, Any]] = field(default_factory=list)
-
-
-def kiro_environment(
-    extra_paths: tuple[str, ...] = (),
-    working_directory: str | None = None,
-) -> dict[str, str]:
-    environment = os.environ.copy()
-    user_home = Path.home()
-    preferred_paths = [str(Path(item).expanduser()) for item in extra_paths]
-    if working_directory:
-        project = Path(working_directory)
-        preferred_paths.extend(
-            str(project / relative)
-            for relative in (
-                ".venv/bin",
-                "venv/bin",
-                "node_modules/.bin",
-            )
-        )
-    preferred_paths.extend(
-        str(user_home / relative)
-        for relative in (
-            ".local/bin",
-            ".cargo/bin",
-            ".npm-global/bin",
-            ".local/share/pnpm",
-            ".bun/bin",
-            ".deno/bin",
-            "go/bin",
-        )
-    )
-    preferred_paths.extend(
-        item
-        for item in environment.get("PATH", "").split(os.pathsep)
-        if item
-    )
-    path_items = list(dict.fromkeys(preferred_paths))
-    environment.update(
-        {
-            "PATH": os.pathsep.join(path_items),
-            "NO_COLOR": "1",
-            "KIRO_LOG_NO_COLOR": "1",
-            "TERM": "dumb",
-        }
-    )
-    return environment
 
 
 class TransportError(RuntimeError):

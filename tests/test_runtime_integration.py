@@ -12,13 +12,9 @@ import pytest
 
 from kiro_api_proxy.event_stream import _crc32c
 from kiro_api_proxy.transports.base import (
-    ErrorCategory,
     EventType,
-    GenerationEvent,
     GenerationRequest,
-    TransportError,
 )
-from kiro_api_proxy.transports.router import AdaptiveTransport
 from kiro_api_proxy.transports.runtime import (
     RuntimeTransport,
     _context_window_tokens,
@@ -87,11 +83,9 @@ def _tool_frame(payload: dict) -> bytes:
 
 def _make_settings(**overrides):
     defaults = {
-        "runtime_enabled": True,
         "runtime_credentials_file": "/tmp/fake-creds.json",
         "runtime_endpoint": "https://test.example.com",
         "timeout_seconds": 60,
-        "transport_priority": ("runtime", "cli"),
     }
     defaults.update(overrides)
     return SimpleNamespace(**defaults)
@@ -375,61 +369,6 @@ class TestRuntimeStreamNoUsage:
 
         assert [e for e in events if e.type is EventType.USAGE] == []
         assert any(e.type is EventType.DONE for e in events)
-
-
-# ============================================================
-# 测试：models 降级
-# ============================================================
-
-
-class FakeCli:
-    name = "cli"
-
-    async def start(self):
-        pass
-
-    async def close(self):
-        pass
-
-    async def models(self):
-        return [{"model_id": "auto", "name": "auto", "provider": "kiro"}]
-
-    async def generate(self, request):
-        return "cli-result"
-
-    async def stream(self, request):
-        yield GenerationEvent(EventType.TEXT_DELTA, text="cli")
-        yield GenerationEvent(EventType.DONE)
-
-    async def cancel(self, request_id):
-        pass
-
-
-class TestModelsDegradation:
-    async def test_runtime_models_fails_degrades_to_cli(self):
-        rt = _make_runtime_transport()
-        cli = FakeCli()
-
-        # RuntimeTransport.models() 抛异常
-        with patch.object(rt, "models", side_effect=TransportError(
-            "网络错误", ErrorCategory.UPSTREAM, retryable=True
-        )):
-            router = AdaptiveTransport([rt, cli])
-            result = await router.models()
-
-        assert result == [{"model_id": "auto", "name": "auto", "provider": "kiro"}]
-
-    async def test_runtime_models_success(self):
-        rt = _make_runtime_transport()
-        cli = FakeCli()
-
-        with patch.object(rt, "models", return_value=[
-            {"model_id": "claude-sonnet-5", "name": "Claude Sonnet 5", "provider": "kiro"}
-        ]):
-            router = AdaptiveTransport([rt, cli])
-            result = await router.models()
-
-        assert result[0]["model_id"] == "claude-sonnet-5"
 
 
 # ============================================================

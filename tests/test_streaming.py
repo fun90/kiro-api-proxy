@@ -6,7 +6,6 @@ from kiro_api_proxy import main
 from kiro_api_proxy.transports import ErrorCategory, EventType, GenerationEvent
 from kiro_api_proxy.config import Settings
 from kiro_api_proxy.transports import GenerationRequest
-from kiro_api_proxy.transports.cli import CliTransport
 
 
 async def _fake_events(*args, **kwargs):
@@ -394,41 +393,6 @@ async def test_outer_cancellation_stops_pending_upstream_before_close(
     task.cancel()
     await asyncio.gather(task, return_exceptions=True)
     assert closed.is_set()
-
-
-async def test_cli_decodes_chinese_across_byte_boundaries(monkeypatch):
-    class Stream:
-        def __init__(self, chunks):
-            self.chunks = list(chunks)
-
-        async def read(self, size=-1):
-            return self.chunks.pop(0) if self.chunks else b""
-
-    class Process:
-        def __init__(self):
-            self.stdout = Stream([b"\xe4", b"\xbd", b"\xa0", b""])
-            self.stderr = Stream([b""])
-            self.returncode = 0
-
-        async def wait(self):
-            return 0
-
-    cli = CliTransport(Settings.from_env())
-    process = Process()
-
-    async def spawn(request):
-        return process
-
-    monkeypatch.setattr(cli, "_spawn", spawn)
-    events = [
-        event
-        async for event in cli.stream(
-            GenerationRequest("auto", "提示")
-        )
-    ]
-    assert "".join(
-        event.text for event in events if event.type is EventType.TEXT_DELTA
-    ) == "你"
 
 
 async def test_slow_consumer_keeps_chunk_order(monkeypatch):

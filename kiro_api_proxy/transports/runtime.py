@@ -1,7 +1,6 @@
 """直接 Runtime 传输实现。
 
-通过 OIDC Bearer Token 调用 Kiro 数据面端点。
-默认关闭，失败时由 AdaptiveTransport 降级到 ACP/CLI。
+通过 OIDC Bearer Token 调用 Kiro 数据面端点，是唯一的上游路径。
 """
 
 from __future__ import annotations

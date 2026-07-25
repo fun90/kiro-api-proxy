@@ -44,38 +44,19 @@ from .tools import (
     parse_tool_input,
 )
 from .transports import (
-    AdaptiveTransport,
-    CliTransport,
     ErrorCategory,
     EventType,
     GenerationEvent,
     GenerationRequest,
     TransportError,
 )
-from .transports.acp import AcpTransport
 from .transports.runtime import RuntimeTransport
 from .usage import TokenUsage, estimate_tokens
 
 logger = logging.getLogger("uvicorn.error")
 logger.setLevel(logging.INFO)
 request_id_var: ContextVar[str] = ContextVar("request_id", default="-")
-cli_transport = CliTransport(settings)
-transport_options: dict[str, Any] = {"cli": cli_transport}
-if settings.acp_enabled:
-    transport_options["acp"] = AcpTransport(settings, cli_transport)
-if settings.runtime_enabled:
-    transport_options["runtime"] = RuntimeTransport(settings)
-ordered_transports = [
-    transport_options[name]
-    for name in settings.transport_priority
-    if name in transport_options
-]
-if cli_transport not in ordered_transports:
-    ordered_transports.append(cli_transport)
-if len(ordered_transports) > 1:
-    transport = AdaptiveTransport(ordered_transports)
-else:
-    transport = cli_transport
+transport = RuntimeTransport(settings)
 model_cache = ModelCache(
     settings.model_cache_ttl_seconds,
     settings.model_cache_stale_seconds,
@@ -83,17 +64,6 @@ model_cache = ModelCache(
 _credential_fingerprint: tuple[int, ...] | None = None
 _inflight_generations: set[str] = set()
 _inflight_lock = asyncio.Lock()
-
-# 保留旧模块级名称，避免现有集成导入时破坏兼容性。
-KIRO_CLI = settings.kiro_cli
-API_KEY = settings.api_key
-DEFAULT_MODEL = settings.default_model
-TIMEOUT = settings.timeout_seconds
-MAX_CONCURRENCY = settings.max_concurrency
-WORKING_DIRECTORY = settings.working_directory
-EFFORT = settings.effort
-TRUST_TOOLS = settings.trust_tools
-RESPONSE_LANGUAGE = settings.response_language
 
 
 def _log(event: str, **fields: Any) -> None:
@@ -233,15 +203,7 @@ def _session_context(request: Request) -> tuple[str, str | None]:
         ),
         request_id_var.get(),
     )
-    if not settings.session_reuse_enabled:
-        return external_id, None
-    credential = (
-        request.headers.get("authorization")
-        or request.headers.get("x-api-key")
-        or "anonymous"
-    )
-    tenant = hashlib.sha256(credential.encode()).hexdigest()[:16]
-    return external_id, f"{tenant}:{external_id}"
+    return external_id, None
 
 
 def _set_session_headers(response: Response, external_id: str) -> None:
@@ -294,7 +256,7 @@ async def call_kiro(
         raise _http_error(exc) from exc
     _log(
         "generation_complete",
-        transport=getattr(transport, "actual_name", transport.name),
+        transport=transport.name,
         model=generation.model,
         total_ms=round((time.perf_counter() - started) * 1000, 2),
     )
@@ -413,25 +375,14 @@ async def _events(
                 ):
                     _log("client_disconnected", transport=transport.name)
                     return
-                if event.data.get("session_rebuilt"):
-                    _log(
-                        "session_rebuilt",
-                        transport=event.data.get("transport", transport.name),
-                        reason=event.data.get(
-                            "session_rebuild_reason", "unknown"
-                        ),
-                    )
                 if first and event.type in {
                     EventType.TEXT_DELTA,
                     EventType.THINKING_DELTA,
                 }:
                     first = False
-                    actual_transport = event.data.get(
-                        "transport", transport.name
-                    )
                     _log(
                         "first_token",
-                        transport=actual_transport,
+                        transport=transport.name,
                         model=generation.model,
                         ttft_ms=round(
                             (time.perf_counter() - started) * 1000, 2
