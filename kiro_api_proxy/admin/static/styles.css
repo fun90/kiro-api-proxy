@@ -147,6 +147,21 @@ code { background: var(--track); padding: 1px 5px; border-radius: 4px; font-size
 .usage-fill { height: 100%; background: var(--accent); transition: width 0.3s; }
 .usage-pct { font-size: 13px; color: var(--muted); margin: 0 0 12px; }
 
+.config-preview {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+  margin: 12px 0 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 320px;
+  overflow: auto;
+}
+
 .local-item {
   display: flex;
   align-items: center;

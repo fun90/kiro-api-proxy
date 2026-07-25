@@ -383,6 +383,9 @@ async function loadSettings() {
     keyInput.value = s.api_key || "";
     keyInput.type = "password";
     $("toggleApiKey").textContent = "显示";
+    // 系统与配置文件路径由服务端判定，用于「客户端配置」卡片的粘贴提示。
+    if (s.platform) platformInfo = s.platform;
+    renderConfigPathHint();
   } catch (err) {
     setText("setError", err.message);
   }
@@ -408,6 +411,112 @@ function generateApiKey() {
   input.type = "text";
   $("toggleApiKey").textContent = "隐藏";
   setText("setOk", "已生成，点击“保存设置”生效", "ok");
+}
+
+// ---- 客户端配置复制 ----
+
+// 基址取当前访问地址，而不是 api_host/api_port：后者可能是 0.0.0.0 这类
+// 无法直接连接的监听地址，而浏览器此刻用的地址一定可达。
+function proxyBaseUrl() {
+  return window.location.origin;
+}
+
+// 未设置 API Key 时给出占位符，提示用户先生成，避免复制出空值配置。
+function configApiKey() {
+  return $("setApiKey").value.trim() || "<未设置 API Key>";
+}
+
+// 系统与配置文件位置由服务端 /settings 返回（前端 navigator 检测不可靠）。
+// 未加载到之前用 POSIX 写法兜底，避免提示区空白。
+let platformInfo = {
+  label: "",
+  claude_config_path: "~/.claude/settings.json",
+  codex_config_path: "~/.codex/config.toml",
+  export_command: 'export KIRO_API_KEY="{key}"',
+};
+
+// 卡片里的路径提示：点按钮前就告知两份配置各自该粘到哪。
+function renderConfigPathHint() {
+  const el = $("configPathHint");
+  if (!el) return;
+  // 两条各占一行（div 块级换行），路径已是服务端展开的绝对路径。
+  el.innerHTML =
+    `<div>Claude Code 配置文件：<code>${escapeHtml(platformInfo.claude_config_path)}</code></div>` +
+    `<div>Codex CLI 配置文件：<code>${escapeHtml(platformInfo.codex_config_path)}</code></div>`;
+}
+
+// Claude Code：settings.json 的 env 片段。输出纯 JSON（不加注释行，JSON 不支持
+// 注释），保证复制结果能直接粘贴；粘贴路径由卡片上的提示按系统给出。
+function claudeConfigText() {
+  // 只输出 "env" 片段（不含最外层 {}），便于插入已有 settings.json；
+  // 内层缩进 2 空格与 Claude Code 默认配置风格一致。
+  const env = JSON.stringify(
+    {
+      ANTHROPIC_AUTH_TOKEN: configApiKey(),
+      ANTHROPIC_BASE_URL: proxyBaseUrl(),
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+    },
+    null,
+    2
+  );
+  return `"env": ${env}`;
+}
+
+// Codex CLI：config.toml。走 OpenAI 兼容通道——base_url 指向 /v1，
+// wire_api = "chat" 即 /v1/chat/completions（"responses" 是 OpenAI 自家协议，
+// 本代理虽也实现了 /v1/responses，但 chat 兼容面最稳）。
+// 粘贴路径由卡片上的提示条给出，不再重复写进配置文本；TOML 支持注释，
+// 所以设置密钥的命令仍按系统写进注释里。
+function codexConfigText() {
+  const base = proxyBaseUrl();
+  const key = configApiKey();
+  return [
+    'model = "claude-sonnet-4.5"',
+    'model_provider = "kiro"',
+    "",
+    "[model_providers.kiro]",
+    'name = "Kiro API Proxy"',
+    `base_url = "${base}/v1"`,
+    'wire_api = "chat"',
+    'env_key = "KIRO_API_KEY"',
+    "",
+    "# 并在环境变量里提供密钥：",
+    `# ${platformInfo.export_command.replace("{key}", key)}`,
+  ].join("\n");
+}
+
+// 复制到剪贴板：优先 navigator.clipboard，非 HTTPS/旧浏览器回退 execCommand。
+async function copyText(text) {
+  if (navigator.clipboard && window.isSecureContext) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.setAttribute("readonly", "");
+  ta.style.position = "fixed";
+  ta.style.opacity = "0";
+  document.body.appendChild(ta);
+  ta.select();
+  const ok = document.execCommand("copy");
+  document.body.removeChild(ta);
+  if (!ok) throw new Error("当前浏览器不支持自动复制，请手动选择下方文本复制");
+}
+
+async function copyClientConfig(label, builder) {
+  setText("copyError", "");
+  setText("copyOk", "");
+  const text = builder();
+  // 无论复制是否成功都展示内容，便于手动复制。
+  const preview = $("configPreview");
+  preview.textContent = text;
+  preview.classList.remove("hidden");
+  try {
+    await copyText(text);
+    setText("copyOk", `${label} 配置已复制到剪贴板`, "ok");
+  } catch (err) {
+    setText("copyError", err.message);
+  }
 }
 
 async function saveSettings() {
@@ -493,6 +602,12 @@ function init() {
   $("saveSettings").addEventListener("click", saveSettings);
   $("toggleApiKey").addEventListener("click", toggleApiKeyVisibility);
   $("genApiKey").addEventListener("click", generateApiKey);
+  $("copyClaudeConfig").addEventListener("click", () =>
+    copyClientConfig("Claude Code", claudeConfigText)
+  );
+  $("copyCodexConfig").addEventListener("click", () =>
+    copyClientConfig("Codex CLI", codexConfigText)
+  );
   // 提醒条里的「设置」链接：切到设置页。
   $("noKeyGoSettings").addEventListener("click", (e) => {
     e.preventDefault();

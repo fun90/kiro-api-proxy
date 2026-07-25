@@ -141,6 +141,21 @@
           <p class="error" id="setError"></p>
           <p class="ok" id="setOk"></p>
         </div>
+
+        <div class="card">
+          <div class="card-head">
+            <h2>客户端配置</h2>
+            <div class="row">
+              <button type="button" class="ghost" id="copyClaudeConfig">复制 Claude 配置</button>
+              <button type="button" class="ghost" id="copyCodexConfig">复制 Codex 配置</button>
+            </div>
+          </div>
+          <p class="muted">按当前访问地址与上方 API Key 生成，点击按钮复制到剪贴板。</p>
+          <p class="hint" id="configPathHint"></p>
+          <pre class="config-preview hidden" id="configPreview"></pre>
+          <p class="error" id="copyError"></p>
+          <p class="ok" id="copyOk"></p>
+        </div>
       </section>
     </div>
   </main>

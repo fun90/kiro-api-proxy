@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import html
 import json
+import sys
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 
@@ -67,6 +68,33 @@ def require_admin_auth(
             status_code=401,
             detail={"error": {"message": "无效的 API Key", "type": "auth_error"}},
         )
+
+
+def _platform_info() -> dict:
+    """运行环境与客户端配置文件位置，供界面提示「粘贴到哪个文件」。
+
+    前端 navigator 检测不可靠（userAgentData 在非安全上下文缺失、platform
+    已被部分浏览器冻结或伪装），改由服务端按 sys.platform 判定，并给出
+    Path.home() 展开后的绝对路径，避免用户再去猜 ~ 或 %USERPROFILE%。
+    """
+    home = Path.home()
+    if sys.platform.startswith("win"):
+        return {
+            "os": "windows",
+            "label": "Windows",
+            "claude_config_path": str(home / ".claude" / "settings.json"),
+            "codex_config_path": str(home / ".codex" / "config.toml"),
+            # PowerShell 下设置环境变量的写法；{key} 由前端替换为实际密钥。
+            "export_command": '$env:KIRO_API_KEY = "{key}"',
+        }
+    darwin = sys.platform == "darwin"
+    return {
+        "os": "macos" if darwin else "linux",
+        "label": "macOS" if darwin else "Linux",
+        "claude_config_path": str(home / ".claude" / "settings.json"),
+        "codex_config_path": str(home / ".codex" / "config.toml"),
+        "export_command": 'export KIRO_API_KEY="{key}"',
+    }
 
 
 def _credentials_info(path_str: str, account_index: int | None) -> dict:
@@ -167,6 +195,7 @@ async def get_settings(
         "api_key": cfg.api_key,
         "has_api_key": bool(cfg.api_key),
         "runtime_account_index": cfg.runtime_account_index,
+        "platform": _platform_info(),
     }
 
 
