@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 交互式安装脚本 — Kiro API Proxy
+# 无交互安装脚本 — Kiro API Proxy
 # 支持 macOS (launchd) 和 Linux (systemd --user)
 set -euo pipefail
 
@@ -13,41 +13,7 @@ err()     { echo -e "${RED}✘${RESET} $*" >&2; }
 heading() { echo -e "\n${BOLD}$*${RESET}"; }
 die()     { err "$*"; exit 1; }
 
-ask() {
-    # ask <变量名> <提示> [默认值]
-    local varname="$1" prompt="$2" default="${3:-}"
-    local display_prompt
-    if [[ -n "$default" ]]; then
-        display_prompt="$prompt [${default}]: "
-    else
-        display_prompt="$prompt: "
-    fi
-    while true; do
-        read -rp "$(echo -e "${BOLD}${display_prompt}${RESET}")" value
-        value="${value:-$default}"
-        if [[ -n "$value" ]]; then
-            printf -v "$varname" '%s' "$value"
-            return
-        fi
-        warn "不能为空，请重新输入。"
-    done
-}
-
-ask_path() {
-    # ask_path <变量名> <提示> [默认值]  — 展开 ~ 并转为绝对路径
-    local varname="$1" prompt="$2" default="${3:-}"
-    local raw expanded
-    ask raw "$prompt" "$default"
-    expanded="${raw/#\~/$HOME}"
-    printf -v "$varname" '%s' "$(realpath -m "$expanded")"
-}
-
-confirm() {
-    # confirm <提示>  — 返回 0=yes 1=no
-    local ans
-    read -rp "$(echo -e "${BOLD}$1 [y/N]: ${RESET}")" ans
-    [[ "${ans,,}" == "y" || "${ans,,}" == "yes" ]]
-}
+# 本脚本全程无交互，所有安装参数取固定默认值（见下方“确定安装参数”）。
 
 # ── 检测平台 ─────────────────────────────────────────────────────────────────
 OS="$(uname -s)"
@@ -81,58 +47,33 @@ else
     die "未找到 pyproject.toml，请在项目根目录或 scripts/ 子目录中运行此脚本。"
 fi
 
-# ── 收集安装参数 ──────────────────────────────────────────────────────────────
-heading "安装目录"
-echo "建议将安装目录与源码目录分开，例如 ~/kiro-api-proxy 或 /opt/kiro-api-proxy。"
-ask_path INSTALL_DIR "安装目录" "$HOME/kiro-api-proxy"
+# ── 确定安装参数（无交互，全部固定默认值）─────────────────────────────────────
+# 安装目录固定为当前目录；配置目录、凭据文件均在其下的 .config/。
+INSTALL_DIR="$(pwd)"
+PORT=3458
+# 工作目录根放开为整个文件系统（该值仅作为可传给上游的路径白名单，非真实文件权限）。
+WORK_DIR="/"
+# 不在安装期指定凭据，安装后经 /admin 登录或手动编辑 runtime-credentials.json。
+CREDS_SRC=""
+ACCT_INDEX=""
+CREDS_DST="$INSTALL_DIR/.config/runtime-credentials.json"
 
+# 已有安装则自动备份 .config/ 后覆盖（不再询问）。
 if [[ -d "$INSTALL_DIR/venv" ]]; then
-    warn "检测到已有安装：$INSTALL_DIR"
-    confirm "覆盖现有安装？（将备份 .config/ 目录）" || die "已取消。"
+    warn "检测到已有安装，将备份 .config/ 后覆盖：$INSTALL_DIR"
     REINSTALL=1
 else
     REINSTALL=0
 fi
 
-heading "服务配置"
-ask PORT "监听端口" "3458"
-ask_path WORK_DIR "Kiro 工作目录（KIRO_WORKING_DIRECTORY）" "$HOME/Code"
-
-heading "凭据配置"
-CREDS_DST="$INSTALL_DIR/.config/runtime-credentials.json"
-echo "需要提供 runtime-credentials.json（含 refresh_token、client_id 等）。"
-echo "可以："
-echo "  1. 现在指定一个已有凭据文件的路径"
-echo "  2. 安装完成后手动编辑 $CREDS_DST"
-if confirm "现在指定已有凭据文件？"; then
-    ask_path CREDS_SRC "凭据文件路径（JSON）" ""
-    [[ -f "$CREDS_SRC" ]] || die "文件不存在：$CREDS_SRC"
-else
-    CREDS_SRC=""
-fi
-
-ACCT_INDEX=""
-if [[ -n "$CREDS_SRC" ]]; then
-    if python3 -c "
-import json,sys
-d=json.load(open('$CREDS_SRC'))
-sys.exit(0 if isinstance(d,list) else 1)
-" 2>/dev/null; then
-        ask ACCT_INDEX "凭据文件是账户数组，请输入要使用的零基索引" "0"
-    fi
-fi
-
-# ── 确认摘要 ──────────────────────────────────────────────────────────────────
 heading "安装摘要"
 echo "  平台           : $PLATFORM"
 echo "  源码目录        : $SOURCE_DIR"
 echo "  安装目录        : $INSTALL_DIR"
 echo "  监听地址        : 127.0.0.1:$PORT"
 echo "  工作目录        : $WORK_DIR"
-echo "  凭据来源        : ${CREDS_SRC:-（安装后手动填写）}"
-[[ -n "$ACCT_INDEX" ]] && echo "  账户索引        : $ACCT_INDEX"
+echo "  凭据来源        : （安装后手动填写或经 /admin 登录）"
 echo ""
-confirm "确认以上配置并开始安装？" || die "已取消。"
 
 # ── 备份（仅重装时）──────────────────────────────────────────────────────────
 if [[ "$REINSTALL" == "1" && -d "$INSTALL_DIR/.config" ]]; then
@@ -151,11 +92,6 @@ if [[ "$REINSTALL" == "1" ]]; then
     fi
 fi
 
-# ── 创建目录结构 ──────────────────────────────────────────────────────────────
-heading "创建目录"
-mkdir -p "$INSTALL_DIR/.config" "$INSTALL_DIR/scripts"
-info "目录就绪：$INSTALL_DIR"
-
 # ── 创建 venv 并安装 ──────────────────────────────────────────────────────────
 heading "安装 Python 包"
 if [[ "$REINSTALL" == "1" ]]; then
@@ -170,11 +106,12 @@ info "已安装到 $INSTALL_DIR/venv"
 heading "写入配置文件"
 CONFIG_FILE="$INSTALL_DIR/.config/config.json"
 
-# 仅当 config.json 不存在或是重装时写入（重装时已备份）。api_key 由脚本预生成
-# 写入；工作目录与配置文件路径通过服务定义的环境变量传入，无需 .env。
+# 仅当 config.json 不存在或是重装时写入（重装时已备份）。api_key 默认为空、
+# 不再预生成，安装后到 /admin 生成并保存；配置目录与工作目录通过服务定义的
+# 环境变量传入，无需 .env。
 if [[ ! -f "$CONFIG_FILE" || "$REINSTALL" == "1" ]]; then
     "$INSTALL_DIR/venv/bin/python" - "$CONFIG_FILE" "$PORT" "$ACCT_INDEX" <<'PY'
-import json, secrets, stat, sys
+import json, stat, sys
 from pathlib import Path
 
 # 凭据路径固定为 config.json 同目录下的 runtime-credentials.json，不写入配置。
@@ -184,7 +121,6 @@ acct = sys.argv[3] if len(sys.argv) > 3 else ""
 data = {
     "api_host": "127.0.0.1",
     "api_port": port,
-    "api_key": secrets.token_urlsafe(32),
 }
 if acct.strip():
     data["runtime_account_index"] = int(acct)
@@ -197,11 +133,6 @@ PY
 else
     info "保留已有配置：$CONFIG_FILE"
 fi
-
-# 读取有效 API 密钥用于完成摘要。
-API_KEY="$("$INSTALL_DIR/venv/bin/python" -c \
-    "import json,sys; print(json.load(open(sys.argv[1])).get('api_key',''))" \
-    "$CONFIG_FILE")"
 
 # ── 凭据文件 ──────────────────────────────────────────────────────────────────
 if [[ -n "$CREDS_SRC" ]]; then
@@ -244,8 +175,8 @@ if [[ "$PLATFORM" == "macos" ]]; then
   </array>
   <key>EnvironmentVariables</key>
   <dict>
-    <key>KIRO_PROXY_CONFIG_FILE</key>
-    <string>${CONFIG_FILE}</string>
+    <key>KIRO_PROXY_CONFIG_DIRECTORY</key>
+    <string>${INSTALL_DIR}/.config</string>
     <key>KIRO_WORKING_DIRECTORY</key>
     <string>${WORK_DIR}</string>
   </dict>
@@ -265,8 +196,31 @@ if [[ "$PLATFORM" == "macos" ]]; then
 </dict>
 </plist>
 EOF
-    launchctl bootstrap "gui/$(id -u)" "$PLIST"
-    info "已加载 launchd 服务"
+    # launchd 幂等注册：bootout 是异步的，若紧接 bootstrap 撞上尚未卸载完的
+    # 同名服务，会报 "5: Input/output error"。故先无条件卸载并轮询确认从
+    # domain 移除，再对 bootstrap 做重试，最后用 kickstart 兜底。
+    domain="gui/$(id -u)"
+    service="$domain/com.fun90.kiro-api-proxy"
+    launchctl bootout "$service" 2>/dev/null || true
+    for _ in $(seq 1 20); do
+        launchctl print "$service" >/dev/null 2>&1 || break
+        sleep 0.5
+    done
+    loaded=0
+    for _ in $(seq 1 10); do
+        if launchctl bootstrap "$domain" "$PLIST" 2>/dev/null; then
+            loaded=1
+            break
+        fi
+        sleep 1
+    done
+    if [[ "$loaded" == "1" ]]; then
+        info "已加载 launchd 服务"
+    elif launchctl kickstart -k "$service" 2>/dev/null; then
+        info "已重启 launchd 服务"
+    else
+        die "launchd 服务加载失败，请手动检查：launchctl print $service"
+    fi
 
 elif [[ "$PLATFORM" == "linux" ]]; then
     UNIT_DIR="$HOME/.config/systemd/user"
@@ -280,7 +234,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-Environment=KIRO_PROXY_CONFIG_FILE=${CONFIG_FILE}
+Environment=KIRO_PROXY_CONFIG_DIRECTORY=${INSTALL_DIR}/.config
 Environment=KIRO_WORKING_DIRECTORY=${WORK_DIR}
 WorkingDirectory=${INSTALL_DIR}
 ExecStart=${INSTALL_DIR}/venv/bin/uvicorn kiro_api_proxy.main:app --host 127.0.0.1 --port ${PORT}
@@ -297,33 +251,6 @@ EOF
     info "已启用 systemd 用户服务"
 fi
 
-# ── 验证 ──────────────────────────────────────────────────────────────────────
-heading "验证服务"
-
-# 若凭据未配置，跳过健康检查
-if grep -q 'YOUR_REFRESH_TOKEN_HERE' "$CREDS_DST" 2>/dev/null; then
-    warn "凭据尚未填写，服务可能无法启动。"
-    warn "请编辑 $CREDS_DST 后运行："
-    if [[ "$PLATFORM" == "macos" ]]; then
-        echo "  launchctl kickstart -k \"gui/\$(id -u)/com.fun90.kiro-api-proxy\""
-    else
-        echo "  systemctl --user restart kiro-api-proxy.service"
-    fi
-else
-    echo "等待服务启动..."
-    sleep 3
-    if curl -fsS "http://127.0.0.1:${PORT}/health" > /dev/null 2>&1; then
-        info "服务正常：http://127.0.0.1:${PORT}/health"
-    else
-        warn "健康检查未通过，请查看日志："
-        if [[ "$PLATFORM" == "macos" ]]; then
-            echo "  tail -f $HOME/Library/Logs/kiro-api-proxy/stderr.log"
-        else
-            echo "  journalctl --user -u kiro-api-proxy -f"
-        fi
-    fi
-fi
-
 # ── 完成摘要 ──────────────────────────────────────────────────────────────────
 heading "安装完成"
 echo ""
@@ -331,7 +258,7 @@ echo "  管理界面    : http://127.0.0.1:${PORT}/admin/"
 echo "  API 文档    : http://127.0.0.1:${PORT}/docs"
 echo "  凭据文件    : $CREDS_DST"
 echo "  配置文件    : $CONFIG_FILE"
-echo "  API 密钥    : $API_KEY"
+echo "  API 密钥    : 未设置，请访问管理界面在“设置”页生成并保存"
 echo ""
 
 if [[ "$PLATFORM" == "macos" ]]; then

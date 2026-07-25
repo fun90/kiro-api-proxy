@@ -36,3 +36,4 @@ env/
 .codegraph/
 
 .config/
+.config.bak*/
