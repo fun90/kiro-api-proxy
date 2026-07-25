@@ -21,10 +21,6 @@ class ModelCache:
         self._snapshot: ModelSnapshot | None = None
         self._lock = asyncio.Lock()
 
-    @property
-    def snapshot(self) -> ModelSnapshot | None:
-        return self._snapshot
-
     def invalidate(self) -> None:
         self._snapshot = None
 

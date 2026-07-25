@@ -357,10 +357,6 @@ class ToolCallAccumulator:
             self._calls[tool_id]["name"] = data["name"]
         self._calls[tool_id]["input"] += data.get("input", "")
 
-    @property
-    def has_calls(self) -> bool:
-        return bool(self._order)
-
     def calls(self) -> list[dict[str, str]]:
         """按到达顺序返回完整调用：`{"id","name","input"}`（input 为 JSON 文本）。"""
         return [

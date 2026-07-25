@@ -1,7 +1,7 @@
 [project]
 name = "kiro-api-proxy"
 version = "1.1.0"
-description = "通过官方 Kiro CLI 提供 OpenAI 与 Anthropic 兼容 API"
+description = "通过 Kiro Runtime 提供 OpenAI 与 Anthropic 兼容 API"
 requires-python = ">=3.11"
 dependencies = [
   "fastapi>=0.115,<1",
