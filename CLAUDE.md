@@ -13,7 +13,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 python -m venv .venv
 ./.venv/bin/pip install -e ".[test]"
 
-# 本地启动（无需 .env；首次启动自动生成 api_key 写入 config.json，打印在日志）
+# 本地启动（无需 .env；api_key 默认为空，无鉴权，可经 /admin 生成并保存）
 ./.venv/bin/uvicorn kiro_api_proxy.main:app --host 127.0.0.1 --port 3458
 
 # 全部测试
@@ -24,6 +24,7 @@ python -m venv .venv
 ./.venv/bin/pytest tests/test_api.py::test_thinking_model_alias
 ```
 
+- 项目根目录已由安装脚本部署为 launchd/systemd 常驻服务，长期监听 `3458`；在项目根目录做本地验证/联调时用 `--port 3459` 启动，避开与常驻服务抢端口。
 - 无 lint/格式化工具链配置，也无 CI；改动后至少跑一遍 `pytest`。
 - `pytest` 已配 `asyncio_mode = auto`，`async def test_*` 直接生效，无需 `@pytest.mark.asyncio`。
 - 启动时凭据文件不存在不会崩溃：`lifespan` 容忍无凭据启动，核心场景是先起服务、再经管理界面登录（见 `main._reload_transport`）。凭据文件路径固定为 `config.json` 同目录下的 `runtime-credentials.json`。
@@ -51,12 +52,12 @@ python -m venv .venv
 
 ## 配置与凭据
 
-- **`config.json` 是主配置，环境变量/`.env` 只是可选覆盖**：`config.json`（默认 `~/.config/kiro-api-proxy/config.json`，可用 `KIRO_PROXY_CONFIG_FILE` 覆盖）由 `admin/config_store.py` 读写，持久化 `api_host`/`api_port`/`api_key`/`runtime_account_index` 这 4 个字段（`_PERSISTED_FIELDS`）；未显式写入的字段回退到 `config.Settings.from_env()`（即环境变量/`.env`）的默认值。运行时读 `config_store.get()`，所以界面改 API Key 能即时生效。普通部署无需写 `.env`——安装脚本或首次启动会把该写的都写进 `config.json`。
-- **首次启动自动生成 api_key**：`lifespan` 调 `config_store.ensure_api_key()`，`api_key` 为空时用 `secrets.token_urlsafe(32)` 生成并写入 `config.json`，明文打印在启动日志（`logger.warning`，绕开 `_log` 脱敏）。所以「无鉴权裸奔」只会出现在测试或异常路径。
-- 鉴权：`main.authorize` 与 `admin/routes.require_admin_auth` 都动态读 `config_store` 的 `api_key`；`api_key` 为空时管理接口放行（本地初始化场景，正常启动后已自动生成故不触发）。
-- 凭据文件路径**固定不可配置**：恒为 `config.json` 同目录下的 `runtime-credentials.json`（`config_store.credentials_path`），随 `KIRO_PROXY_CONFIG_FILE` 一起移动。`config.Settings.runtime_credentials_file` 不再从环境变量读，仅由 `_reload_transport` 以该推导值填充。内容既支持单凭据对象，也支持 Kiro Account Manager 的账户数组（配 `RUNTIME_ACCOUNT_INDEX` 选账号）。加载见 `runtime_credentials.load_credentials`，格式见 `credentials.example.json`。
+- **`config.json` 是主配置，环境变量/`.env` 只是可选覆盖**：`config.json`（默认为配置目录下的 `config.json`；配置目录默认安装目录下的 `.config/`，可用 `KIRO_PROXY_CONFIG_DIRECTORY` 覆盖）由 `admin/config_store.py` 读写，持久化 `api_host`/`api_port`/`api_key`/`runtime_account_index` 这 4 个字段（`_PERSISTED_FIELDS`）；未显式写入的字段回退到 `config.Settings.from_env()`（即环境变量/`.env`）的默认值。运行时读 `config_store.get()`，所以界面改 API Key 能即时生效。普通部署无需写 `.env`——安装脚本会把该写的都写进 `config.json`。
+- **api_key 默认为空、不再自动生成**：`lifespan` 不再生成密钥，仅在 `api_key` 为空时 `logger.warning` 提醒当前无鉴权。密钥由管理界面「设置」页生成并保存（前端 `crypto.getRandomValues` 生成 32 字节 base64url，等价 `secrets.token_urlsafe(32)`），经 `/settings` 写入 `config.json`。所以「无鉴权裸奔」是未配置密钥时的正常默认状态。
+- 鉴权：`main.authorize` 与 `admin/routes.require_admin_auth` 都动态读 `config_store` 的 `api_key`；`api_key` 为空时管理接口放行（未配置密钥的默认场景，首次访问 `/admin` 会提醒生成）。`/settings` 端点受 `require_admin_auth` 保护，回显真实 `api_key` 供设置页「小眼睛」查看。
+- 凭据文件路径**固定不可配置**：恒为 `config.json` 同目录下的 `runtime-credentials.json`（`config_store.credentials_path`），随 `KIRO_PROXY_CONFIG_DIRECTORY` 一起移动。`config.Settings.runtime_credentials_file` 不再从环境变量读，仅由 `_reload_transport` 以该推导值填充。内容既支持单凭据对象，也支持 Kiro Account Manager 的账户数组（配 `RUNTIME_ACCOUNT_INDEX` 选账号）。加载见 `runtime_credentials.load_credentials`，格式见 `credentials.example.json`。
 - 凭据/账户索引变更后，`admin/routes` 通过 `set_reload_hook` 注入的钩子调用 `main._reload_transport` **热重载** `RuntimeTransport`（避免管理模块直接依赖 transport 造成循环导入）。
-- **真实账号验证**：用真实 Kiro 账号做本地联调/验证时，相关配置统一放在仓库根目录的 `.config/` 下——只需两个文件：`.config/config.json`（服务配置，含 `api_key`）和 `.config/runtime-credentials.json`（OIDC 凭据，程序会自动回写刷新）。两者必须同目录，凭据路径由 `config.json` 位置推导得出。该目录已在 `.gitignore` 中忽略，含真实凭据，切勿提交或把其中的值回显到输出。启动时用 `KIRO_PROXY_CONFIG_FILE=.config/config.json` 指向该配置即可，无需 `.env`。
+- **真实账号验证**：用真实 Kiro 账号做本地联调/验证时，相关配置统一放在仓库根目录的 `.config/` 下——只需两个文件：`.config/config.json`（服务配置，含 `api_key`）和 `.config/runtime-credentials.json`（OIDC 凭据，程序会自动回写刷新）。两者必须同目录，凭据路径由 `config.json` 位置推导得出。该目录已在 `.gitignore` 中忽略，含真实凭据，切勿提交或把其中的值回显到输出。启动时用 `KIRO_PROXY_CONFIG_DIRECTORY=.config` 指向该目录即可，无需 `.env`。
 
 ## 管理界面（admin 子包）
 

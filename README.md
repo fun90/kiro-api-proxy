@@ -43,7 +43,7 @@ python -m venv .venv
 ```text
 <安装目录>/
 ├── .config/
-│   ├── config.json              # 服务配置（含 api_key），脚本预生成
+│   ├── config.json              # 服务配置，安装脚本预生成（api_key 默认为空）
 │   └── runtime-credentials.json # OIDC 凭据，程序自动回写刷新
 ├── scripts/
 └── venv/
@@ -51,27 +51,28 @@ python -m venv .venv
 
 ### macOS / Linux（推荐）
 
-在源码根目录执行交互式安装脚本，按提示输入安装目录、工作目录和凭据路径，
-脚本会自动创建 venv、生成 API 密钥写入 `config.json`，并注册系统服务
-（服务定义通过环境变量注入 `KIRO_PROXY_CONFIG_FILE`/`KIRO_WORKING_DIRECTORY`，
-不再需要 `.env`）：
+在源码根目录执行安装脚本，全程无交互、安装到当前目录（工作目录默认放开为
+整个文件系统 `/`）。脚本会自动创建 venv、写入 `config.json`（api_key 默认为空），
+并注册系统服务（服务定义通过环境变量注入
+`KIRO_PROXY_CONFIG_DIRECTORY`/`KIRO_WORKING_DIRECTORY`，不再需要 `.env`）：
 
 ```bash
 bash scripts/install.sh
 ```
 
-脚本会在最后打印 API 密钥和常用服务管理命令。
+脚本会在最后打印服务管理命令；API Key 需在 `/admin` 管理界面生成并保存。
 
 ### Windows
 
-在源码根目录以 PowerShell 执行交互式安装脚本，按提示输入安装目录、工作目录和凭据路径，
-脚本会自动创建 venv、生成 API 密钥写入 `config.json`，并注册登录时自动启动的计划任务：
+在源码根目录以 PowerShell 执行安装脚本，全程无交互、安装到当前目录（工作目录
+默认放开为系统盘 `C:\`）。脚本会自动创建 venv、写入 `config.json`（api_key 默认为空），
+并注册登录时自动启动的计划任务：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\install.ps1
 ```
 
-脚本会在最后打印 API 密钥和常用服务管理命令。
+脚本会在最后打印服务管理命令；API Key 需在 `/admin` 管理界面生成并保存。
 ## 接口
 
 - `GET /`
@@ -116,12 +117,12 @@ powershell -ExecutionPolicy Bypass -File scripts\install.ps1
 
 服务从环境变量读取配置：
 
-- `PROXY_API_KEY`：代理接口 Bearer 密钥。留空则首次启动自动生成随机密钥
-  并写入 `config.json`（打印在启动日志），无需手动设置。`config.json` 中的
+- `PROXY_API_KEY`：代理接口 Bearer 密钥。默认为空（无鉴权），不再自动生成；
+  建议留空并在 `/admin` 管理界面「设置」页生成并保存。`config.json` 中的
   值优先于此环境变量。
-- `KIRO_PROXY_CONFIG_FILE`：管理端动态配置文件路径，其中的配置优先于
-  环境变量。默认 `~/.config/kiro-api-proxy/config.json`；安装脚本通过服务
-  定义的环境变量指向 `<安装目录>/.config/config.json`。
+- `KIRO_PROXY_CONFIG_DIRECTORY`：管理端动态配置目录（存放 `config.json` 与
+  `runtime-credentials.json`），其中的配置优先于环境变量。默认安装目录下的
+  `.config/`；安装脚本通过服务定义的环境变量指向 `<安装目录>/.config/`。
 - `DEFAULT_MODEL`：默认 `auto`。
 - `REQUEST_TIMEOUT_SECONDS`：请求绝对总超时，默认 `600`。
 - `KIRO_WORKING_DIRECTORY`：允许解析的工作目录根。Claude Code
@@ -154,8 +155,8 @@ powershell -ExecutionPolicy Bypass -File scripts\install.ps1
 
 ## 使用
 
-`$PROXY_API_KEY` 为鉴权密钥，取自首次启动日志或 `config.json` 中的
-`api_key`（也可在 `/admin` 管理界面查看）。
+`$PROXY_API_KEY` 为鉴权密钥，在 `/admin` 管理界面「设置」页生成并保存后，
+取自 `config.json` 中的 `api_key`（也可在该页面查看）。
 
 ```bash
 curl http://127.0.0.1:3458/v1/chat/completions \
