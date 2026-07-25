@@ -34,102 +34,200 @@ cp .env.example .env
 服务启动后可访问 `http://127.0.0.1:3458/docs` 查看接口文档。未配置
 `RUNTIME_CREDENTIALS_FILE` 时服务启动即失败，不再回退到本地 kiro-cli。
 
-## 本机部署（systemd 用户服务）
+## 安装
 
-以下步骤适用于使用 systemd 的 Linux 桌面或服务器。服务安装到用户目录，
-无需 root 权限，默认只监听 `127.0.0.1:3458`。
+建议将代码目录、安装目录和运行配置分开。安装目录结构如下：
 
-### 1. 安装程序
-
-```bash
-mkdir -p "$HOME/.local/share/kiro-api-proxy"
-git clone https://github.com/fun90/kiro-api-proxy.git \
-  "$HOME/.local/share/kiro-api-proxy/app"
-cd "$HOME/.local/share/kiro-api-proxy/app"
-
-python -m venv "$HOME/.local/share/kiro-api-proxy/venv"
-"$HOME/.local/share/kiro-api-proxy/venv/bin/pip" install -e .
+```text
+<安装目录>/
+├── config/
+│   ├── .env
+│   ├── .env.proxy-api-key
+│   └── runtime-credentials.json
+├── scripts/
+└── venv/
 ```
 
-### 2. 创建代理密钥
+`venv` 使用非 editable 方式安装，修改源码不会直接影响正在运行的服务。
+配置文件和凭据统一放在 `config/`，不要提交到 Git。
 
-```bash
-mkdir -p "$HOME/.config/kiro-api-proxy"
-openssl rand -hex 32 > "$HOME/.config/kiro-api-proxy/api-key"
-chmod 600 "$HOME/.config/kiro-api-proxy/api-key"
+### Windows
+
+以下命令在 PowerShell 中执行。先将 `$InstallDir` 改为实际安装目录：
+
+```powershell
+$SourceDir = (Get-Location).Path
+$InstallDir = "D:\kiro-api-proxy"
+
+New-Item -ItemType Directory -Force `
+  "$InstallDir\config", "$InstallDir\scripts" | Out-Null
+py -3.11 -m venv "$InstallDir\venv"
+& "$InstallDir\venv\Scripts\python.exe" -m pip install $SourceDir
 ```
 
-复制环境配置：
+创建配置和密钥：
 
-```bash
-cp .env.example "$HOME/.config/kiro-api-proxy/proxy.env"
+```powershell
+Copy-Item "$SourceDir\.env.example" "$InstallDir\config\.env"
+Copy-Item "$SourceDir\credentials.example.json" `
+  "$InstallDir\config\runtime-credentials.json"
+& "$InstallDir\venv\Scripts\python.exe" -c `
+  "import secrets,sys; open(sys.argv[1],'w').write(secrets.token_hex(32))" `
+  "$InstallDir\config\.env.proxy-api-key"
 ```
 
-至少修改以下配置：
+修改 `$InstallDir\config\.env`，路径建议使用正斜杠：
 
 ```dotenv
-PROXY_API_KEY_FILE=/home/你的用户名/.config/kiro-api-proxy/api-key
-KIRO_WORKING_DIRECTORY=/home/你的用户名
-```
-
-systemd 的 `EnvironmentFile` 不会展开 `$HOME` 或 `~`，因此
-`proxy.env` 中的文件路径必须填写绝对路径。
-
-### 3. 配置 Runtime 凭据
-
-Runtime 支持两种凭据来源。
-
-方式一：使用独立凭据文件。复制示例并填入自己的 Kiro OIDC 凭据：
-
-```bash
-cp credentials.example.json \
-  "$HOME/.config/kiro-api-proxy/runtime-credentials.json"
-chmod 600 "$HOME/.config/kiro-api-proxy/runtime-credentials.json"
-```
-
-然后在 `proxy.env` 中配置：
-
-```dotenv
-RUNTIME_CREDENTIALS_FILE=/home/你的用户名/.config/kiro-api-proxy/runtime-credentials.json
+PROXY_API_KEY_FILE=D:/kiro-api-proxy/config/.env.proxy-api-key
+KIRO_WORKING_DIRECTORY=D:/Code
+RUNTIME_CREDENTIALS_FILE=D:/kiro-api-proxy/config/runtime-credentials.json
 RUNTIME_ACCOUNT_INDEX=
 ```
 
-方式二：复用 Kiro Account Manager 的账户文件。先查看可用账号及其零基索引，
-命令不会输出 Token 或 Client Secret：
+填好 `runtime-credentials.json` 后，注册当前用户登录时启动的计划任务：
 
-```bash
-jq 'to_entries
-  | map(select(.value.enabled == true and .value.status == "active"))
-  | map({
-      index: .key,
-      label: (.value.label // .value.email // ""),
-      provider: .value.provider,
-      region: .value.region,
-      has_profile: (.value.profileArn != null and .value.profileArn != "")
-    })' \
-  "$HOME/.local/share/.kiro-account-manager/accounts.json"
+```powershell
+$Python = "$InstallDir\venv\Scripts\python.exe"
+$EnvFile = "$InstallDir\config\.env"
+$Arguments = "-m uvicorn --env-file `"$EnvFile`" " +
+  "kiro_api_proxy.main:app --host 127.0.0.1 --port 3458"
+$Action = New-ScheduledTaskAction -Execute $Python `
+  -Argument $Arguments -WorkingDirectory $InstallDir
+$Trigger = New-ScheduledTaskTrigger -AtLogOn
+$Settings = New-ScheduledTaskSettingsSet `
+  -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
+Register-ScheduledTask -TaskName "Kiro API Proxy" `
+  -Action $Action -Trigger $Trigger -Settings $Settings -Force
+Start-ScheduledTask -TaskName "Kiro API Proxy"
 ```
 
-收紧账户文件权限：
+验证：
 
-```bash
-chmod 600 "$HOME/.local/share/.kiro-account-manager/accounts.json"
+```powershell
+Invoke-RestMethod http://127.0.0.1:3458/health
+Start-Process http://127.0.0.1:3458/admin/
 ```
 
-在 `proxy.env` 中填写账户文件绝对路径和选中的索引：
+### macOS
+
+在源码根目录执行，并将 `INSTALL_DIR` 改为实际安装目录：
+
+```bash
+SOURCE_DIR="$(pwd)"
+INSTALL_DIR="/绝对路径/kiro-api-proxy"
+
+mkdir -p "$INSTALL_DIR/config" "$INSTALL_DIR/scripts"
+python3 -m venv "$INSTALL_DIR/venv"
+"$INSTALL_DIR/venv/bin/pip" install "$SOURCE_DIR"
+install -m 600 "$SOURCE_DIR/.env.example" "$INSTALL_DIR/config/.env"
+install -m 600 "$SOURCE_DIR/credentials.example.json" \
+  "$INSTALL_DIR/config/runtime-credentials.json"
+openssl rand -hex 32 > "$INSTALL_DIR/config/.env.proxy-api-key"
+chmod 600 "$INSTALL_DIR/config/.env.proxy-api-key"
+```
+
+修改 `$INSTALL_DIR/config/.env`：
 
 ```dotenv
-RUNTIME_CREDENTIALS_FILE=/home/你的用户名/.local/share/.kiro-account-manager/accounts.json
-RUNTIME_ACCOUNT_INDEX=填写上一步显示的索引
+PROXY_API_KEY_FILE=/绝对路径/kiro-api-proxy/config/.env.proxy-api-key
+KIRO_WORKING_DIRECTORY=/绝对路径/Code
+RUNTIME_CREDENTIALS_FILE=/绝对路径/kiro-api-proxy/config/runtime-credentials.json
+RUNTIME_ACCOUNT_INDEX=
 ```
 
-### 4. 安装 systemd 服务
+填好 `runtime-credentials.json`，然后创建日志目录：
 
 ```bash
-mkdir -p "$HOME/.config/systemd/user"
+mkdir -p "$HOME/Library/LaunchAgents" \
+  "$HOME/Library/Logs/kiro-api-proxy"
 ```
 
-创建 `~/.config/systemd/user/kiro-api-proxy.service`：
+创建 `~/Library/LaunchAgents/com.fun90.kiro-api-proxy.plist`。launchd 不会展开
+环境变量或 `~`，以下 `<安装目录>` 和 `<用户目录>` 必须替换为绝对路径：
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.fun90.kiro-api-proxy</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>&lt;安装目录&gt;/venv/bin/uvicorn</string>
+    <string>--env-file</string>
+    <string>&lt;安装目录&gt;/config/.env</string>
+    <string>kiro_api_proxy.main:app</string>
+    <string>--host</string>
+    <string>127.0.0.1</string>
+    <string>--port</string>
+    <string>3458</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>&lt;安装目录&gt;</string>
+  <key>StandardOutPath</key>
+  <string>&lt;用户目录&gt;/Library/Logs/kiro-api-proxy/stdout.log</string>
+  <key>StandardErrorPath</key>
+  <string>&lt;用户目录&gt;/Library/Logs/kiro-api-proxy/stderr.log</string>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ThrottleInterval</key>
+  <integer>5</integer>
+</dict>
+</plist>
+```
+
+加载服务并验证：
+
+```bash
+launchctl bootstrap "gui/$(id -u)" \
+  "$HOME/Library/LaunchAgents/com.fun90.kiro-api-proxy.plist"
+curl -fsS http://127.0.0.1:3458/health
+open http://127.0.0.1:3458/admin/
+```
+
+重启或停止服务：
+
+```bash
+launchctl kickstart -k "gui/$(id -u)/com.fun90.kiro-api-proxy"
+launchctl bootout "gui/$(id -u)/com.fun90.kiro-api-proxy"
+```
+
+### Linux
+
+在源码根目录执行，并将 `INSTALL_DIR` 改为实际安装目录：
+
+```bash
+SOURCE_DIR="$(pwd)"
+INSTALL_DIR="/绝对路径/kiro-api-proxy"
+
+mkdir -p "$INSTALL_DIR/config" "$INSTALL_DIR/scripts"
+python3 -m venv "$INSTALL_DIR/venv"
+"$INSTALL_DIR/venv/bin/pip" install "$SOURCE_DIR"
+install -m 600 "$SOURCE_DIR/.env.example" "$INSTALL_DIR/config/.env"
+install -m 600 "$SOURCE_DIR/credentials.example.json" \
+  "$INSTALL_DIR/config/runtime-credentials.json"
+openssl rand -hex 32 > "$INSTALL_DIR/config/.env.proxy-api-key"
+chmod 600 "$INSTALL_DIR/config/.env.proxy-api-key"
+```
+
+修改 `$INSTALL_DIR/config/.env`：
+
+```dotenv
+PROXY_API_KEY_FILE=/绝对路径/kiro-api-proxy/config/.env.proxy-api-key
+KIRO_WORKING_DIRECTORY=/绝对路径/Code
+RUNTIME_CREDENTIALS_FILE=/绝对路径/kiro-api-proxy/config/runtime-credentials.json
+RUNTIME_ACCOUNT_INDEX=
+```
+
+填好 `runtime-credentials.json`，然后创建
+`~/.config/systemd/user/kiro-api-proxy.service`。systemd 单元中的
+`<安装目录>` 必须替换为绝对路径：
 
 ```ini
 [Unit]
@@ -139,9 +237,9 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-EnvironmentFile=%h/.config/kiro-api-proxy/proxy.env
-WorkingDirectory=%h/.local/share/kiro-api-proxy/app
-ExecStart=%h/.local/share/kiro-api-proxy/venv/bin/uvicorn kiro_api_proxy.main:app --host 127.0.0.1 --port 3458
+EnvironmentFile=<安装目录>/config/.env
+WorkingDirectory=<安装目录>
+ExecStart=<安装目录>/venv/bin/uvicorn kiro_api_proxy.main:app --host 127.0.0.1 --port 3458
 Restart=on-failure
 RestartSec=2
 KillMode=control-group
@@ -151,66 +249,56 @@ TimeoutStopSec=10
 WantedBy=default.target
 ```
 
-加载并启动：
+加载服务并验证：
 
 ```bash
 systemctl --user daemon-reload
 systemctl --user enable --now kiro-api-proxy.service
 systemctl --user status kiro-api-proxy.service --no-pager
-```
-
-如需在用户未登录时也启动服务，可由管理员执行：
-
-```bash
-sudo loginctl enable-linger "$USER"
-```
-
-### 5. 验证部署
-
-检查健康状态：
-
-```bash
 curl -fsS http://127.0.0.1:3458/health
 ```
 
-验证模型发现和真实生成：
+管理端地址为 `http://127.0.0.1:3458/admin/`。如需在用户未登录时也运行，
+可由管理员执行 `sudo loginctl enable-linger "$USER"`。
 
-```bash
-PROXY_API_KEY="$(<"$HOME/.config/kiro-api-proxy/api-key")"
+### 更新与回滚
 
-curl -fsS http://127.0.0.1:3458/v1/models \
-  -H "Authorization: Bearer $PROXY_API_KEY"
+更新前应完整备份安装目录。Windows PowerShell：
 
-curl -fsS http://127.0.0.1:3458/v1/chat/completions \
-  -H "Authorization: Bearer $PROXY_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "claude-sonnet-4.6",
-    "messages": [{"role": "user", "content": "只回复 RUNTIME_OK"}]
-  }'
+```powershell
+$BackupDir = "$InstallDir-backups\$(Get-Date -Format yyyyMMdd-HHmmss)"
+Copy-Item -Recurse -Force $InstallDir $BackupDir
 ```
 
-查看生成日志：
+macOS 或 Linux：
 
 ```bash
-journalctl --user -u kiro-api-proxy.service --since "5 minutes ago" \
-  --no-pager | grep '"transport": "runtime"'
+BACKUP_ROOT="/绝对路径/kiro-api-proxy-backups"
+BACKUP_DIR="$BACKUP_ROOT/$(date +%Y%m%d-%H%M%S)"
+mkdir -p "$BACKUP_ROOT"
+cp -R -p "$INSTALL_DIR" "$BACKUP_DIR"
 ```
 
-预期日志包含 `first_token` 事件和 `"transport": "runtime"`。如果指定账号
-返回 `MONTHLY_REQUEST_COUNT`，请选择另一个仍有可用额度的活动账号并更新
-`RUNTIME_ACCOUNT_INDEX`。
-
-### 6. 更新
-
-更新代码并重启：
+更新源码后，使用安装目录中的 Python 重新安装，再通过对应平台的任务管理器、
+launchd 或 systemd 重启服务：
 
 ```bash
-cd "$HOME/.local/share/kiro-api-proxy/app"
-git pull --ff-only
-"$HOME/.local/share/kiro-api-proxy/venv/bin/pip" install -e .
-systemctl --user restart kiro-api-proxy.service
+git -C "$SOURCE_DIR" pull --ff-only
+"$INSTALL_DIR/venv/bin/pip" install --upgrade --force-reinstall "$SOURCE_DIR"
 ```
+
+Windows 使用等价的 PowerShell 命令：
+
+```powershell
+git -C $SourceDir pull --ff-only
+& "$InstallDir\venv\Scripts\python.exe" -m pip install `
+  --upgrade --force-reinstall $SourceDir
+Stop-ScheduledTask -TaskName "Kiro API Proxy"
+Start-ScheduledTask -TaskName "Kiro API Proxy"
+```
+
+如果新版验证失败，停止服务，将当前安装目录移走，把对应备份恢复为原安装目录，
+再重新启动服务。
 
 ## 接口
 

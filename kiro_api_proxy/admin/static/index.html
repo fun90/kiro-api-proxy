@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Kiro API Proxy 管理</title>
+  <link rel="stylesheet" href="/admin/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <h1>Kiro API Proxy</h1>
+    <span class="auth-status" id="authStatus"></span>
+  </header>
+
+  <main id="app">
+    <!-- 登录遮罩 -->
+    <section class="card login-gate hidden" id="loginGate">
+      <h2>管理登录</h2>
+      <p class="muted">请输入 API Key（PROXY_API_KEY）以访问管理界面。</p>
+      <div class="row">
+        <input type="password" id="loginKey" placeholder="API Key" autocomplete="current-password">
+        <button id="loginBtn">登录</button>
+      </div>
+      <p class="error" id="loginError"></p>
+    </section>
+
+    <div id="panels" class="hidden">
+      <nav class="tabs">
+        <button class="tab active" data-tab="overview">概览</button>
+        <button class="tab" data-tab="usage">额度</button>
+        <button class="tab" data-tab="login">登录授权</button>
+        <button class="tab" data-tab="settings">设置</button>
+      </nav>
+
+      <!-- 概览：登录配置 -->
+      <section class="tabpane active" data-pane="overview">
+        <div class="card">
+          <div class="card-head">
+            <h2>登录配置</h2>
+            <button class="ghost" id="refreshStatus">刷新</button>
+          </div>
+          <dl class="kv" id="credInfo"></dl>
+        </div>
+      </section>
+
+      <!-- 额度 -->
+      <section class="tabpane" data-pane="usage">
+        <div class="card">
+          <div class="card-head">
+            <h2>Kiro 额度</h2>
+            <button class="ghost" id="refreshUsage">刷新</button>
+          </div>
+          <div id="usageBody"><p class="muted">点击刷新查询额度。</p></div>
+        </div>
+      </section>
+
+      <!-- 登录授权 -->
+      <section class="tabpane" data-pane="login">
+        <div class="card">
+          <h2>IAM Identity Center 登录</h2>
+          <p class="muted">通过企业 SSO 授权，自动获取并保存 Kiro 凭据。</p>
+          <div class="row">
+            <input type="text" id="ssoStartUrl" placeholder="Start URL（默认 https://view.awsapps.com/start）">
+            <input type="text" id="ssoRegion" placeholder="区域（默认 us-east-1）">
+            <button id="ssoStartBtn">开始登录</button>
+          </div>
+          <div class="sso-step hidden" id="ssoStep">
+            <p>1. 打开授权链接并在浏览器完成登录：</p>
+            <p><a id="ssoLink" href="#" target="_blank" rel="noopener"></a></p>
+            <p>2. 授权后浏览器会跳转到 <code>http://127.0.0.1/oauth/callback?...</code>（页面打不开属正常）。复制完整地址粘贴到下方：</p>
+            <div class="row">
+              <input type="text" id="ssoCallback" placeholder="粘贴回调 URL">
+              <button id="ssoCompleteBtn">完成登录</button>
+            </div>
+          </div>
+          <p class="error" id="ssoError"></p>
+          <p class="ok" id="ssoOk"></p>
+        </div>
+
+        <div class="card">
+          <h2>导入凭据 JSON</h2>
+          <p class="muted">上传 JSON 文件或直接粘贴凭据对象／Kiro Account Manager 账户数组。</p>
+          <div class="row">
+            <input type="file" id="credFile" accept=".json,application/json">
+          </div>
+          <textarea id="credJson" rows="8" placeholder='{ "refresh_token": "...", "client_id": "...", "client_secret": "...", "auth_region": "us-east-1", "profile_arn": "arn:aws:codewhisperer:..." }'></textarea>
+          <div class="row">
+            <input type="number" id="credIndex" placeholder="账户索引（数组时可选）" min="0">
+            <button id="credImportBtn">导入并保存</button>
+          </div>
+          <p class="error" id="credError"></p>
+          <p class="ok" id="credOk"></p>
+        </div>
+      </section>
+
+      <!-- 设置 -->
+      <section class="tabpane" data-pane="settings">
+        <div class="card">
+          <h2>服务设置</h2>
+          <div class="field">
+            <label>API 监听地址</label>
+            <input type="text" id="setHost">
+          </div>
+          <div class="field">
+            <label>API 端口</label>
+            <input type="number" id="setPort" min="1" max="65535">
+          </div>
+          <div class="field">
+            <label>API Key（留空不修改）</label>
+            <input type="password" id="setApiKey">
+          </div>
+          <div class="field">
+            <label>凭据文件路径</label>
+            <input type="text" id="setCredFile">
+          </div>
+          <button id="saveSettings">保存设置</button>
+          <p class="hint">监听地址与端口需重启服务后生效。</p>
+          <p class="error" id="setError"></p>
+          <p class="ok" id="setOk"></p>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <script src="/admin/app.js"></script>
+</body>
+</html>

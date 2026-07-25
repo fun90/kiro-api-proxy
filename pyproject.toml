@@ -9,6 +9,9 @@ dependencies = [
   "uvicorn[standard]>=0.30,<1",
 ]
 
+[project.scripts]
+kiro-api-proxy = "kiro_api_proxy.main:run"
+
 [project.optional-dependencies]
 test = [
   "anthropic>=0.75,<1",
@@ -24,3 +27,6 @@ testpaths = ["tests"]
 
 [tool.setuptools.packages.find]
 include = ["kiro_api_proxy*"]
+
+[tool.setuptools.package-data]
+"kiro_api_proxy.admin" = ["static/*"]

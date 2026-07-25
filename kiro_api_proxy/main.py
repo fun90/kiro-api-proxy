@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
 import hashlib
@@ -14,7 +15,10 @@ from pathlib import Path
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 
+from .admin.config_store import store as config_store
+from .admin.routes import router as admin_router, set_reload_hook
 from .config import settings
 from .model_cache import ModelCache
 from .prompts import (
@@ -80,10 +84,12 @@ def authorize(
     authorization: str | None = Header(default=None),
     x_api_key: str | None = Header(default=None, alias="x-api-key"),
 ) -> None:
+    # 动态读取 config.json（优先）/.env 的 API Key，使界面改 Key 即时生效。
+    api_key = config_store.get().api_key
     if (
-        settings.api_key
-        and authorization != f"Bearer {settings.api_key}"
-        and x_api_key != settings.api_key
+        api_key
+        and authorization != f"Bearer {api_key}"
+        and x_api_key != api_key
     ):
         raise HTTPException(
             status_code=401,
@@ -1054,9 +1060,37 @@ async def responses_stream(
     yield "data: [DONE]\n\n"
 
 
+async def _reload_transport() -> None:
+    """用 config.json（优先）/.env 的最新凭据重建 Runtime 传输。
+
+    供界面登录/导入凭据/改凭据路径后热重载调用；也用于启动初始化。
+    失败仅记录日志，不影响调用方——凭据已通过校验写入，重启即可生效，
+    且核心场景允许先启动服务、后登录。
+    """
+    global transport
+    cfg = config_store.get()
+    new_settings = dataclasses.replace(
+        settings,
+        runtime_credentials_file=cfg.runtime_credentials_file,
+        runtime_account_index=cfg.runtime_account_index,
+    )
+    candidate = RuntimeTransport(new_settings)
+    try:
+        await candidate.start()
+    except TransportError as exc:
+        await candidate.close()
+        _log("transport_reload_failed", error=str(exc))
+        return
+    old = transport
+    transport = candidate
+    model_cache.invalidate()
+    await old.close()
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    await transport.start()
+    # 容忍无凭据启动：核心场景是先启动服务、再通过管理界面登录。
+    await _reload_transport()
     try:
         yield
     finally:
@@ -1064,6 +1098,9 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="Kiro API Proxy", version="1.1.0", lifespan=lifespan)
+
+# 界面登录/导入凭据后热重载传输。
+set_reload_hook(_reload_transport)
 
 
 @app.middleware("http")
@@ -1346,6 +1383,26 @@ async def openai_error(_: Request, exc: HTTPException):
         else {"error": {"message": str(detail), "type": "api_error"}}
     )
     return JSONResponse(status_code=exc.status_code, content=payload)
+
+
+# 管理接口与静态页。include_router 在所有 @app 路由之后注册，
+# StaticFiles 挂在 /admin 兜底其余静态资源，不会抢占 /admin/api/* 与
+# /admin/models/refresh。
+app.include_router(admin_router)
+_ADMIN_STATIC_DIR = Path(__file__).parent / "admin" / "static"
+app.mount(
+    "/admin",
+    StaticFiles(directory=_ADMIN_STATIC_DIR, html=True),
+    name="admin-static",
+)
+
+
+def run() -> None:
+    """命令行入口：按 config.json（优先）/.env 的地址端口启动服务。"""
+    import uvicorn
+
+    cfg = config_store.get()
+    uvicorn.run(app, host=cfg.api_host, port=cfg.api_port)
 
 
 __all__ = [
