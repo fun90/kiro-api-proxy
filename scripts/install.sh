@@ -88,7 +88,7 @@ ask_path INSTALL_DIR "安装目录" "$HOME/kiro-api-proxy"
 
 if [[ -d "$INSTALL_DIR/venv" ]]; then
     warn "检测到已有安装：$INSTALL_DIR"
-    confirm "覆盖现有安装？（将备份 config/ 目录）" || die "已取消。"
+    confirm "覆盖现有安装？（将备份 .config/ 目录）" || die "已取消。"
     REINSTALL=1
 else
     REINSTALL=0
@@ -99,7 +99,7 @@ ask PORT "监听端口" "3458"
 ask_path WORK_DIR "Kiro 工作目录（KIRO_WORKING_DIRECTORY）" "$HOME/Code"
 
 heading "凭据配置"
-CREDS_DST="$INSTALL_DIR/config/runtime-credentials.json"
+CREDS_DST="$INSTALL_DIR/.config/runtime-credentials.json"
 echo "需要提供 runtime-credentials.json（含 refresh_token、client_id 等）。"
 echo "可以："
 echo "  1. 现在指定一个已有凭据文件的路径"
@@ -135,9 +135,9 @@ echo ""
 confirm "确认以上配置并开始安装？" || die "已取消。"
 
 # ── 备份（仅重装时）──────────────────────────────────────────────────────────
-if [[ "$REINSTALL" == "1" && -d "$INSTALL_DIR/config" ]]; then
-    BACKUP="$INSTALL_DIR/config.bak.$(date +%Y%m%d-%H%M%S)"
-    cp -Rp "$INSTALL_DIR/config" "$BACKUP"
+if [[ "$REINSTALL" == "1" && -d "$INSTALL_DIR/.config" ]]; then
+    BACKUP="$INSTALL_DIR/.config.bak.$(date +%Y%m%d-%H%M%S)"
+    cp -Rp "$INSTALL_DIR/.config" "$BACKUP"
     info "已备份配置到 $BACKUP"
 fi
 
@@ -153,7 +153,7 @@ fi
 
 # ── 创建目录结构 ──────────────────────────────────────────────────────────────
 heading "创建目录"
-mkdir -p "$INSTALL_DIR/config" "$INSTALL_DIR/scripts"
+mkdir -p "$INSTALL_DIR/.config" "$INSTALL_DIR/scripts"
 info "目录就绪：$INSTALL_DIR"
 
 # ── 创建 venv 并安装 ──────────────────────────────────────────────────────────
@@ -166,48 +166,42 @@ fi
 "$INSTALL_DIR/venv/bin/pip" install --quiet "$SOURCE_DIR"
 info "已安装到 $INSTALL_DIR/venv"
 
-# ── 生成 API 密钥 ─────────────────────────────────────────────────────────────
-heading "生成代理 API 密钥"
-KEY_FILE="$INSTALL_DIR/config/.env.proxy-api-key"
-if [[ ! -f "$KEY_FILE" || "$REINSTALL" == "1" ]]; then
-    "$INSTALL_DIR/venv/bin/python" -c \
-        "import secrets,sys; open(sys.argv[1],'w').write(secrets.token_hex(32))" \
-        "$KEY_FILE"
-    chmod 600 "$KEY_FILE"
-    info "已生成密钥：$KEY_FILE"
-else
-    info "保留已有密钥：$KEY_FILE"
-fi
-
-# ── 写入 .env ─────────────────────────────────────────────────────────────────
+# ── 写入配置文件 ──────────────────────────────────────────────────────────────
 heading "写入配置文件"
-ENV_FILE="$INSTALL_DIR/config/.env"
+CONFIG_FILE="$INSTALL_DIR/.config/config.json"
 
-# 仅当 .env 不存在或是重装时覆盖（重装时已备份）
-if [[ ! -f "$ENV_FILE" || "$REINSTALL" == "1" ]]; then
-    cat > "$ENV_FILE" <<EOF
-PROXY_API_KEY_FILE=${KEY_FILE}
-DEFAULT_MODEL=auto
-REQUEST_TIMEOUT_SECONDS=600
-KIRO_WORKING_DIRECTORY=${WORK_DIR}
-KIRO_EFFORT=
-RESPONSE_LANGUAGE=简体中文
+# 仅当 config.json 不存在或是重装时写入（重装时已备份）。api_key 由脚本预生成
+# 写入；工作目录与配置文件路径通过服务定义的环境变量传入，无需 .env。
+if [[ ! -f "$CONFIG_FILE" || "$REINSTALL" == "1" ]]; then
+    "$INSTALL_DIR/venv/bin/python" - "$CONFIG_FILE" "$PORT" "$ACCT_INDEX" <<'PY'
+import json, secrets, stat, sys
+from pathlib import Path
 
-MODEL_CACHE_ENABLED=true
-MODEL_CACHE_TTL_SECONDS=300
-MODEL_CACHE_STALE_SECONDS=3600
-
-INCREMENTAL_STREAMING=true
-
-RUNTIME_CREDENTIALS_FILE=${CREDS_DST}
-RUNTIME_ACCOUNT_INDEX=${ACCT_INDEX}
-RUNTIME_ENDPOINT=
-EOF
-    chmod 600 "$ENV_FILE"
-    info "已写入 $ENV_FILE"
+# 凭据路径固定为 config.json 同目录下的 runtime-credentials.json，不写入配置。
+# argv[3]（账户索引）可能缺省：用 len 守卫，避免空参在某些 shell 下丢失时越界。
+path, port = sys.argv[1], int(sys.argv[2])
+acct = sys.argv[3] if len(sys.argv) > 3 else ""
+data = {
+    "api_host": "127.0.0.1",
+    "api_port": port,
+    "api_key": secrets.token_urlsafe(32),
+}
+if acct.strip():
+    data["runtime_account_index"] = int(acct)
+p = Path(path)
+p.parent.mkdir(parents=True, exist_ok=True)
+p.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+p.chmod(stat.S_IRUSR | stat.S_IWUSR)
+PY
+    info "已写入 $CONFIG_FILE"
 else
-    info "保留已有 .env，如需更新请手动编辑：$ENV_FILE"
+    info "保留已有配置：$CONFIG_FILE"
 fi
+
+# 读取有效 API 密钥用于完成摘要。
+API_KEY="$("$INSTALL_DIR/venv/bin/python" -c \
+    "import json,sys; print(json.load(open(sys.argv[1])).get('api_key',''))" \
+    "$CONFIG_FILE")"
 
 # ── 凭据文件 ──────────────────────────────────────────────────────────────────
 if [[ -n "$CREDS_SRC" ]]; then
@@ -242,14 +236,19 @@ if [[ "$PLATFORM" == "macos" ]]; then
   <key>ProgramArguments</key>
   <array>
     <string>${INSTALL_DIR}/venv/bin/uvicorn</string>
-    <string>--env-file</string>
-    <string>${ENV_FILE}</string>
     <string>kiro_api_proxy.main:app</string>
     <string>--host</string>
     <string>127.0.0.1</string>
     <string>--port</string>
     <string>${PORT}</string>
   </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>KIRO_PROXY_CONFIG_FILE</key>
+    <string>${CONFIG_FILE}</string>
+    <key>KIRO_WORKING_DIRECTORY</key>
+    <string>${WORK_DIR}</string>
+  </dict>
   <key>WorkingDirectory</key>
   <string>${INSTALL_DIR}</string>
   <key>StandardOutPath</key>
@@ -281,7 +280,8 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-EnvironmentFile=${ENV_FILE}
+Environment=KIRO_PROXY_CONFIG_FILE=${CONFIG_FILE}
+Environment=KIRO_WORKING_DIRECTORY=${WORK_DIR}
 WorkingDirectory=${INSTALL_DIR}
 ExecStart=${INSTALL_DIR}/venv/bin/uvicorn kiro_api_proxy.main:app --host 127.0.0.1 --port ${PORT}
 Restart=on-failure
@@ -330,8 +330,8 @@ echo ""
 echo "  管理界面    : http://127.0.0.1:${PORT}/admin/"
 echo "  API 文档    : http://127.0.0.1:${PORT}/docs"
 echo "  凭据文件    : $CREDS_DST"
-echo "  配置文件    : $ENV_FILE"
-echo "  API 密钥    : $(cat "$KEY_FILE")"
+echo "  配置文件    : $CONFIG_FILE"
+echo "  API 密钥    : $API_KEY"
 echo ""
 
 if [[ "$PLATFORM" == "macos" ]]; then

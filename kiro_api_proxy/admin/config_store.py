@@ -17,14 +17,17 @@ from pathlib import Path
 from ..config import settings
 
 
-def _default_config_path() -> Path:
-    """config.json 默认路径，可用 KIRO_PROXY_CONFIG_FILE 覆盖。"""
-    override = os.getenv("KIRO_PROXY_CONFIG_FILE", "").strip()
+def _default_config_dir() -> Path:
+    """config 目录：默认安装目录下的 .config/，可用 KIRO_PROXY_CONFIG_DIRECTORY 覆盖。"""
+    override = os.getenv("KIRO_PROXY_CONFIG_DIRECTORY", "").strip()
     if override:
         return Path(override).expanduser()
-    base = os.getenv("XDG_CONFIG_HOME", "").strip()
-    root = Path(base).expanduser() if base else Path.home() / ".config"
-    return root / "kiro-api-proxy" / "config.json"
+    return Path.cwd() / ".config"
+
+
+def _default_config_path() -> Path:
+    """config.json 默认路径：config 目录下的 config.json。"""
+    return _default_config_dir() / "config.json"
 
 
 # 界面可编辑且需持久化的字段。值为 None 表示尚未显式设置，读取时回退到 .env 默认。
@@ -32,7 +35,6 @@ _PERSISTED_FIELDS = (
     "api_host",
     "api_port",
     "api_key",
-    "runtime_credentials_file",
     "runtime_account_index",
 )
 
@@ -62,6 +64,15 @@ class ConfigStore:
     def path(self) -> Path:
         return self._path
 
+    @property
+    def credentials_path(self) -> Path:
+        """凭据文件固定在 config.json 同目录下的 runtime-credentials.json。
+
+        不再可配置：程序（SSO/导入/刷新回写）统一读写这个位置，与 config.json
+        同目录，随 KIRO_PROXY_CONFIG_DIRECTORY 一起移动。
+        """
+        return self._path.parent / "runtime-credentials.json"
+
     def _load(self) -> None:
         try:
             text = self._path.read_text(encoding="utf-8")
@@ -84,7 +95,6 @@ class ConfigStore:
             "api_host": os.getenv("PROXY_HOST", "127.0.0.1"),
             "api_port": int(os.getenv("PROXY_PORT", "3458")),
             "api_key": settings.api_key,
-            "runtime_credentials_file": settings.runtime_credentials_file,
             "runtime_account_index": settings.runtime_account_index,
         }
 
@@ -97,9 +107,8 @@ class ConfigStore:
                 api_host=str(merged["api_host"]),
                 api_port=int(merged["api_port"]),
                 api_key=str(merged["api_key"] or ""),
-                runtime_credentials_file=str(
-                    merged["runtime_credentials_file"] or ""
-                ),
+                # 凭据路径固定为 config.json 同目录，不再可配置。
+                runtime_credentials_file=str(self.credentials_path),
                 runtime_account_index=(
                     int(merged["runtime_account_index"])
                     if merged["runtime_account_index"] is not None

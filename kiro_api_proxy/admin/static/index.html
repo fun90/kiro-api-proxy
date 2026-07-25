@@ -16,7 +16,7 @@
     <!-- 登录遮罩 -->
     <section class="card login-gate hidden" id="loginGate">
       <h2>管理登录</h2>
-      <p class="muted">请输入 API Key（PROXY_API_KEY）以访问管理界面。</p>
+      <p class="muted">请输入 API Key 以访问管理界面（首次启动自动生成，见服务日志或 config.json）。</p>
       <div class="row">
         <input type="password" id="loginKey" placeholder="API Key" autocomplete="current-password">
         <button id="loginBtn">登录</button>
@@ -25,6 +25,12 @@
     </section>
 
     <div id="panels" class="hidden">
+      <!-- 未设置 API Key 时的无鉴权提醒（首次访问引导生成） -->
+      <div class="notice hidden" id="noKeyNotice">
+        尚未设置 API Key，当前管理界面与代理接口均<strong>无鉴权</strong>。请前往
+        <a href="#" id="noKeyGoSettings">设置</a> 页生成并保存 API Key。
+      </div>
+
       <nav class="tabs">
         <button class="tab active" data-tab="overview">概览</button>
         <button class="tab" data-tab="usage">额度</button>
@@ -57,6 +63,17 @@
       <!-- 登录授权 -->
       <section class="tabpane" data-pane="login">
         <div class="card">
+          <div class="card-head">
+            <h2>从本机 Kiro 登录导入</h2>
+            <button class="ghost" id="scanLocalBtn">扫描本机凭据</button>
+          </div>
+          <p class="muted">检测本机 kiro cli / kiro ide 登录后保存的凭据（AWS SSO 缓存），一键导入。</p>
+          <div id="localList"></div>
+          <p class="error" id="localError"></p>
+          <p class="ok" id="localOk"></p>
+        </div>
+
+        <div class="card">
           <h2>IAM Identity Center 登录</h2>
           <p class="muted">通过企业 SSO 授权，自动获取并保存 Kiro 凭据。</p>
           <div class="row">
@@ -67,10 +84,15 @@
           <div class="sso-step hidden" id="ssoStep">
             <p>1. 打开授权链接并在浏览器完成登录：</p>
             <p><a id="ssoLink" href="#" target="_blank" rel="noopener"></a></p>
-            <p>2. 授权后浏览器会跳转到 <code>http://127.0.0.1/oauth/callback?...</code>（页面打不开属正常）。复制完整地址粘贴到下方：</p>
-            <div class="row">
-              <input type="text" id="ssoCallback" placeholder="粘贴回调 URL">
-              <button id="ssoCompleteBtn">完成登录</button>
+            <div id="ssoAuto" class="hidden">
+              <p id="ssoAutoHint" class="muted">2. 授权后浏览器会自动跳回并完成登录，本页会自动刷新，无需手动操作。</p>
+            </div>
+            <div id="ssoManual" class="hidden">
+              <p>2. 授权后浏览器会跳转到 <code>http://127.0.0.1/oauth/callback?...</code>（页面打不开属正常）。复制完整地址粘贴到下方：</p>
+              <div class="row">
+                <input type="text" id="ssoCallback" placeholder="粘贴回调 URL">
+                <button id="ssoCompleteBtn">完成登录</button>
+              </div>
             </div>
           </div>
           <p class="error" id="ssoError"></p>
@@ -106,12 +128,13 @@
             <input type="number" id="setPort" min="1" max="65535">
           </div>
           <div class="field">
-            <label>API Key（留空不修改）</label>
-            <input type="password" id="setApiKey">
-          </div>
-          <div class="field">
-            <label>凭据文件路径</label>
-            <input type="text" id="setCredFile">
+            <label>API Key</label>
+            <div class="row">
+              <input type="password" id="setApiKey" placeholder="未设置" autocomplete="new-password">
+              <button type="button" class="ghost" id="toggleApiKey" title="显示/隐藏">显示</button>
+              <button type="button" class="ghost" id="genApiKey">自动生成</button>
+            </div>
+            <p class="hint">留空并保存将清除 API Key（管理界面与代理接口将无鉴权）。</p>
           </div>
           <button id="saveSettings">保存设置</button>
           <p class="hint">监听地址与端口需重启服务后生效。</p>

@@ -18,7 +18,11 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from .admin.config_store import store as config_store
-from .admin.routes import router as admin_router, set_reload_hook
+from .admin.routes import (
+    public_router as admin_public_router,
+    router as admin_router,
+    set_reload_hook,
+)
 from .config import settings
 from .model_cache import ModelCache
 from .prompts import (
@@ -1061,11 +1065,11 @@ async def responses_stream(
 
 
 async def _reload_transport() -> None:
-    """用 config.json（优先）/.env 的最新凭据重建 Runtime 传输。
+    """用 config.json 的最新账户索引重建 Runtime 传输。
 
-    供界面登录/导入凭据/改凭据路径后热重载调用；也用于启动初始化。
-    失败仅记录日志，不影响调用方——凭据已通过校验写入，重启即可生效，
-    且核心场景允许先启动服务、后登录。
+    凭据路径固定（config.json 同目录），供界面登录/导入凭据/切换账户索引
+    后热重载调用；也用于启动初始化。失败仅记录日志，不影响调用方——凭据已
+    通过校验写入，重启即可生效，且核心场景允许先启动服务、后登录。
     """
     global transport
     cfg = config_store.get()
@@ -1089,6 +1093,13 @@ async def _reload_transport() -> None:
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    # api_key 默认为空、不再自动生成；未配置时管理接口放行，首次访问 /admin
+    # 会提示生成并保存（见 admin 静态页）。此处仅提醒当前处于无鉴权状态。
+    if not config_store.get().api_key:
+        logger.warning(
+            "未配置 API Key，当前代理与管理接口均无鉴权；"
+            "请访问 /admin 生成并保存 API Key。"
+        )
     # 容忍无凭据启动：核心场景是先启动服务、再通过管理界面登录。
     await _reload_transport()
     try:
@@ -1389,6 +1400,8 @@ async def openai_error(_: Request, exc: HTTPException):
 # StaticFiles 挂在 /admin 兜底其余静态资源，不会抢占 /admin/api/* 与
 # /admin/models/refresh。
 app.include_router(admin_router)
+# SSO 自动回调端点（/oauth/callback），无前缀，路径受 AWS 白名单约束。
+app.include_router(admin_public_router)
 _ADMIN_STATIC_DIR = Path(__file__).parent / "admin" / "static"
 app.mount(
     "/admin",

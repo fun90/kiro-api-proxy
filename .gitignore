@@ -3,6 +3,8 @@
 .env.*
 !.env.example
 credentials.json
+runtime-credentials.json
+kiro-auth-token.json
 *.key
 *.pem
 
@@ -10,6 +12,8 @@ credentials.json
 __pycache__/
 *.py[cod]
 *.egg-info/
+build/
+dist/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
@@ -30,3 +34,5 @@ env/
 
 # 本地代码索引
 .codegraph/
+
+.config/

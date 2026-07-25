@@ -12,6 +12,7 @@ import pytest
 from kiro_api_proxy.admin.credentials_import import (
     CredentialImportError,
     import_credentials,
+    normalize_fields,
 )
 
 VALID = {
@@ -88,3 +89,55 @@ def test_import_missing_fields_does_not_overwrite(tmp_path: Path):
 def test_import_rejects_scalar(tmp_path: Path):
     with pytest.raises(CredentialImportError, match="必须是 JSON 对象或账户数组"):
         import_credentials("123", str(tmp_path / "x.json"))
+
+
+def test_normalize_fields_camelcase():
+    """kiro cli/ide 的 camelCase 字段归一化为 snake_case。"""
+    out = normalize_fields(
+        {
+            "refreshToken": "rt",
+            "clientId": "cid",
+            "clientSecret": "cs",
+            "region": "ap-southeast-2",
+            "profileArn": "arn:...",
+            "accessToken": "at",
+            "expiresAt": "2026-07-25T14:10:01.899Z",
+        }
+    )
+    assert out["refresh_token"] == "rt"
+    assert out["client_id"] == "cid"
+    assert out["client_secret"] == "cs"
+    assert out["auth_region"] == "ap-southeast-2"
+    assert out["profile_arn"] == "arn:..."
+    assert out["expires_at"] == "2026-07-25T14:10:01.899Z"
+
+
+def test_normalize_fields_snake_case_preferred():
+    """同时存在 snake_case 与 camelCase 时优先取 snake_case。"""
+    out = normalize_fields({"refresh_token": "snake", "refreshToken": "camel"})
+    assert out["refresh_token"] == "snake"
+
+
+def test_normalize_fields_drops_empty():
+    """空值不进入归一化结果。"""
+    out = normalize_fields({"refreshToken": "", "clientId": "cid"})
+    assert "refresh_token" not in out
+    assert out["client_id"] == "cid"
+
+
+def test_import_camelcase_object_with_profile(tmp_path: Path):
+    """带 profileArn 的 camelCase 单对象可直接同步导入（无需刷新）。"""
+    target = tmp_path / "creds.json"
+    camel = {
+        "refreshToken": "rt-abc",
+        "clientId": "cid",
+        "clientSecret": "csecret",
+        "region": "us-east-1",
+        "profileArn": "arn:aws:codewhisperer:us-east-1:123:profile/P1",
+        "expiresAt": "2026-07-25T14:10:01.899Z",
+    }
+    path, source_index = import_credentials(json.dumps(camel), str(target))
+    assert path == target
+    saved = json.loads(target.read_text(encoding="utf-8"))
+    assert saved["refresh_token"] == "rt-abc"
+    assert saved["profile_arn"].endswith("profile/P1")

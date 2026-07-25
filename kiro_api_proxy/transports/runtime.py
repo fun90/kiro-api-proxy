@@ -57,6 +57,40 @@ def _context_window_tokens(model: dict[str, Any]) -> int | None:
 KIRO_VERSION = "0.11.107"
 
 
+def kiro_headers(token: str, *, runtime: bool) -> dict[str, str]:
+    """构造 Kiro 数据面请求头。
+
+    CodeWhisperer/Q 端点会对缺少合规 AWS SDK 头（User-Agent、
+    x-amz-user-agent、optout 等）的请求返回 HTTP 400，因此模型发现、
+    额度查询、profile 补全等所有 REST 调用都必须复用这套头。
+    runtime=True 走 codewhispererruntime，False 走 streaming。
+    """
+    api_name = "codewhispererruntime" if runtime else "codewhispererstreaming"
+    sdk_version = "1.0.0" if runtime else "1.0.34"
+    system = f"{platform.system().lower()}#{platform.release()}"
+    user_agent = (
+        f"aws-sdk-js/{sdk_version} ua/2.1 os/{system} lang/js "
+        f"md/nodejs#22.22.0 api/{api_name}#{sdk_version} m/E KiroIDE-{KIRO_VERSION}"
+    )
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        "Accept": "application/json" if runtime else "*/*",
+        "User-Agent": user_agent,
+        "x-amz-user-agent": f"aws-sdk-js/{sdk_version} KiroIDE-{KIRO_VERSION}",
+        "x-amzn-codewhisperer-optout": "true",
+    }
+    if not runtime:
+        headers.update(
+            {
+                "x-amzn-kiro-agent-mode": "vibe",
+                "Amz-Sdk-Request": "attempt=1; max=3",
+                "Amz-Sdk-Invocation-Id": str(uuid.uuid4()),
+            }
+        )
+    return headers
+
+
 class RuntimeTransport:
     """直接 Runtime 传输：Bearer 认证调用 Kiro 数据面。"""
 
@@ -357,27 +391,4 @@ class RuntimeTransport:
         return None
 
     def _headers(self, token: str, *, runtime: bool) -> dict[str, str]:
-        api_name = "codewhispererruntime" if runtime else "codewhispererstreaming"
-        sdk_version = "1.0.0" if runtime else "1.0.34"
-        system = f"{platform.system().lower()}#{platform.release()}"
-        user_agent = (
-            f"aws-sdk-js/{sdk_version} ua/2.1 os/{system} lang/js "
-            f"md/nodejs#22.22.0 api/{api_name}#{sdk_version} m/E KiroIDE-{KIRO_VERSION}"
-        )
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-            "Accept": "application/json" if runtime else "*/*",
-            "User-Agent": user_agent,
-            "x-amz-user-agent": f"aws-sdk-js/{sdk_version} KiroIDE-{KIRO_VERSION}",
-            "x-amzn-codewhisperer-optout": "true",
-        }
-        if not runtime:
-            headers.update(
-                {
-                    "x-amzn-kiro-agent-mode": "vibe",
-                    "Amz-Sdk-Request": "attempt=1; max=3",
-                    "Amz-Sdk-Invocation-Id": str(uuid.uuid4()),
-                }
-            )
-        return headers
+        return kiro_headers(token, runtime=runtime)

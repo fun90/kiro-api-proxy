@@ -55,6 +55,8 @@ async function checkAuth() {
   $("loginGate").classList.add("hidden");
   $("panels").classList.remove("hidden");
   setText("authStatus", status.requires_auth ? "已登录" : "免鉴权", "auth-status ok");
+  // 未设置 API Key（无鉴权）时展示提醒条，引导前往设置页生成。
+  $("noKeyNotice").classList.toggle("hidden", Boolean(status.requires_auth));
   renderCredInfo(status.credentials);
   return true;
 }
@@ -152,16 +154,32 @@ function renderUsage(u) {
 // ---- SSO 登录 ----
 
 let ssoSessionId = "";
+let ssoPollTimer = null;
+
+function stopSsoPoll() {
+  if (ssoPollTimer !== null) {
+    clearTimeout(ssoPollTimer);
+    ssoPollTimer = null;
+  }
+}
 
 async function ssoStart() {
   setText("ssoError", "");
   setText("ssoOk", "");
+  stopSsoPoll();
+  const startUrl = $("ssoStartUrl").value.trim();
+  const region = $("ssoRegion").value.trim() || "us-east-1";
+  // 记住本次输入，下次打开无需重新填写。
+  try {
+    localStorage.setItem("ssoStartUrl", startUrl);
+    localStorage.setItem("ssoRegion", region);
+  } catch (_) {}
   try {
     const res = await api("/sso/start", {
       method: "POST",
       body: JSON.stringify({
-        start_url: $("ssoStartUrl").value.trim(),
-        region: $("ssoRegion").value.trim() || "us-east-1",
+        start_url: startUrl,
+        region: region,
       }),
     });
     ssoSessionId = res.session_id;
@@ -169,9 +187,56 @@ async function ssoStart() {
     link.href = res.authorize_url;
     link.textContent = res.authorize_url;
     $("ssoStep").classList.remove("hidden");
+    // auto=true：回调直达本服务，轮询自动完成；否则回退手动粘贴回调 URL。
+    const auto = Boolean(res.auto);
+    $("ssoAuto").classList.toggle("hidden", !auto);
+    $("ssoManual").classList.toggle("hidden", auto);
+    if (auto) {
+      // 会话 TTL 600s，轮询至完成/失败/过期为止。
+      pollSso(ssoSessionId, Date.now() + 600000);
+    }
   } catch (err) {
     setText("ssoError", err.message);
   }
+}
+
+// 轮询自动回调进度：pending 继续等待，终态更新界面并停止。
+function pollSso(sessionId, deadline) {
+  ssoPollTimer = setTimeout(async () => {
+    // 期间用户又发起了新会话，丢弃本轮结果。
+    if (sessionId !== ssoSessionId) return;
+    try {
+      const res = await api(
+        `/sso/poll?session_id=${encodeURIComponent(sessionId)}`
+      );
+      if (sessionId !== ssoSessionId) return;
+      if (res.status === "success") {
+        stopSsoPoll();
+        setText("ssoOk", `登录成功，凭据已保存到 ${res.path}`, "ok");
+        $("ssoStep").classList.add("hidden");
+        refreshStatus();
+        return;
+      }
+      if (res.status === "error") {
+        stopSsoPoll();
+        setText("ssoError", res.error || "登录失败，请重试");
+        return;
+      }
+      if (res.status === "not_found") {
+        stopSsoPoll();
+        setText("ssoError", "登录会话已过期，请重新发起登录");
+        return;
+      }
+    } catch (_) {
+      // 单次轮询网络抖动不终止，继续等待。
+    }
+    if (Date.now() > deadline) {
+      stopSsoPoll();
+      setText("ssoError", "登录超时，请重新发起登录");
+      return;
+    }
+    pollSso(sessionId, deadline);
+  }, 2000);
 }
 
 async function ssoComplete() {
@@ -190,6 +255,78 @@ async function ssoComplete() {
     refreshStatus();
   } catch (err) {
     setText("ssoError", err.message);
+  }
+}
+
+// ---- 从本机 Kiro 登录导入 ----
+
+async function scanLocal() {
+  setText("localError", "");
+  setText("localOk", "");
+  const list = $("localList");
+  list.innerHTML = '<p class="muted">扫描中…</p>';
+  try {
+    const res = await api("/credentials/scan");
+    renderLocalList(res.credentials || []);
+  } catch (err) {
+    list.innerHTML = "";
+    setText("localError", err.message);
+  }
+}
+
+function renderLocalList(creds) {
+  const list = $("localList");
+  if (!creds.length) {
+    list.innerHTML =
+      '<p class="muted">未发现本机 Kiro 登录凭据（未检测到 AWS SSO 缓存）。</p>';
+    return;
+  }
+  list.innerHTML = creds
+    .map((c) => {
+      const meta = [c.auth_method, c.provider, c.region]
+        .filter(Boolean)
+        .map(escapeHtml)
+        .join(" · ");
+      const warn = c.has_client_secret
+        ? ""
+        : '<span class="muted">（缺 client 信息，可能无法刷新）</span>';
+      return `
+        <div class="local-item">
+          <div class="local-meta">
+            <div>${meta || "Kiro 凭据"} ${warn}</div>
+            <div class="muted">${escapeHtml(c.token_file)}</div>
+            ${c.expires_at ? `<div class="muted">Token 到期：${escapeHtml(c.expires_at)}</div>` : ""}
+          </div>
+          <button data-local-id="${escapeHtml(c.id)}">导入</button>
+        </div>`;
+    })
+    .join("");
+  list.querySelectorAll("button[data-local-id]").forEach((btn) => {
+    btn.addEventListener("click", () => importLocal(btn.dataset.localId, btn));
+  });
+}
+
+async function importLocal(id, btn) {
+  setText("localError", "");
+  setText("localOk", "");
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = "导入中…";
+  }
+  try {
+    const res = await api("/credentials/import-local", {
+      method: "POST",
+      body: JSON.stringify({ id }),
+    });
+    setText("localOk", `导入成功，凭据已保存到 ${res.path}`, "ok");
+    refreshStatus();
+  } catch (err) {
+    setText("localError", err.message);
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = "导入";
+    }
   }
 }
 
@@ -241,23 +378,48 @@ async function loadSettings() {
     const s = await api("/settings");
     $("setHost").value = s.api_host || "";
     $("setPort").value = s.api_port || "";
-    $("setCredFile").value = s.runtime_credentials_file || "";
-    $("setApiKey").placeholder = s.has_api_key ? "已设置（留空不修改）" : "未设置";
+    // 回显真实 api_key（本端点受鉴权保护）；默认隐藏，点小眼睛查看。
+    const keyInput = $("setApiKey");
+    keyInput.value = s.api_key || "";
+    keyInput.type = "password";
+    $("toggleApiKey").textContent = "显示";
   } catch (err) {
     setText("setError", err.message);
   }
 }
 
+// 小眼睛：切换 API Key 明文/密文显示。
+function toggleApiKeyVisibility() {
+  const input = $("setApiKey");
+  const shown = input.type !== "password";
+  input.type = shown ? "password" : "text";
+  $("toggleApiKey").textContent = shown ? "显示" : "隐藏";
+}
+
+// 客户端生成随机 API Key（等价 secrets.token_urlsafe(32)：32 字节 base64url）。
+function generateApiKey() {
+  const bytes = new Uint8Array(32);
+  crypto.getRandomValues(bytes);
+  let bin = "";
+  for (const b of bytes) bin += String.fromCharCode(b);
+  const key = btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  const input = $("setApiKey");
+  input.value = key;
+  input.type = "text";
+  $("toggleApiKey").textContent = "隐藏";
+  setText("setOk", "已生成，点击“保存设置”生效", "ok");
+}
+
 async function saveSettings() {
   setText("setError", "");
   setText("setOk", "");
+  const newKey = $("setApiKey").value.trim();
   const patch = {
     api_host: $("setHost").value.trim(),
     api_port: Number($("setPort").value),
-    runtime_credentials_file: $("setCredFile").value.trim(),
+    // 总是提交 api_key：留空即清除（恢复默认，通常为无鉴权），非空则设置。
+    api_key: newKey || null,
   };
-  const newKey = $("setApiKey").value.trim();
-  if (newKey) patch.api_key = newKey;
   try {
     const res = await api("/settings", {
       method: "POST",
@@ -266,12 +428,12 @@ async function saveSettings() {
     let msg = "已保存";
     if (res.restart_required) msg += "，监听地址/端口将在重启后生效";
     setText("setOk", msg, "ok");
-    // 若修改了 API Key，同步本地会话密钥，避免后续请求 401。
-    if (newKey) {
-      apiKey = newKey;
-      sessionStorage.setItem(KEY_STORAGE, newKey);
-      $("setApiKey").value = "";
-    }
+    // 同步本地会话密钥，避免后续请求 401（清空时一并清除）。
+    apiKey = newKey;
+    if (newKey) sessionStorage.setItem(KEY_STORAGE, newKey);
+    else sessionStorage.removeItem(KEY_STORAGE);
+    // 刷新鉴权状态：更新顶部标识与无鉴权提醒条。
+    await checkAuth();
   } catch (err) {
     setText("setError", err.message);
   }
@@ -316,11 +478,26 @@ function init() {
   });
   $("refreshStatus").addEventListener("click", refreshStatus);
   $("refreshUsage").addEventListener("click", refreshUsage);
+  $("scanLocalBtn").addEventListener("click", scanLocal);
   $("ssoStartBtn").addEventListener("click", ssoStart);
   $("ssoCompleteBtn").addEventListener("click", ssoComplete);
+  // 回填上一次的 Start URL / 区域，避免每次重新输入。
+  try {
+    const savedUrl = localStorage.getItem("ssoStartUrl");
+    const savedRegion = localStorage.getItem("ssoRegion");
+    if (savedUrl) $("ssoStartUrl").value = savedUrl;
+    if (savedRegion) $("ssoRegion").value = savedRegion;
+  } catch (_) {}
   $("credFile").addEventListener("change", handleCredFile);
   $("credImportBtn").addEventListener("click", importCredentials);
   $("saveSettings").addEventListener("click", saveSettings);
+  $("toggleApiKey").addEventListener("click", toggleApiKeyVisibility);
+  $("genApiKey").addEventListener("click", generateApiKey);
+  // 提醒条里的「设置」链接：切到设置页。
+  $("noKeyGoSettings").addEventListener("click", (e) => {
+    e.preventDefault();
+    document.querySelector('.tab[data-tab="settings"]').click();
+  });
 
   checkAuth().catch((err) => {
     setText("loginError", err.message);

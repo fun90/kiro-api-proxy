@@ -19,32 +19,32 @@ git clone https://github.com/fun90/kiro-api-proxy.git
 cd kiro-api-proxy
 python -m venv .venv
 ./.venv/bin/pip install -e .
-cp .env.example .env
+./.venv/bin/uvicorn kiro_api_proxy.main:app --host 127.0.0.1 --port 3458
 ```
 
-在 `.env` 中设置 `PROXY_API_KEY`（或将 `PROXY_API_KEY_FILE` 指向权限为
-`0600` 的密钥文件），并配置 `RUNTIME_CREDENTIALS_FILE` 指向凭据文件，
-然后启动：
+首次启动会自动生成鉴权 API Key 并写入 `config.json`（默认
+`~/.config/kiro-api-proxy/config.json`），密钥打印在启动日志中，也可在
+`/admin` 管理界面查看或修改。凭据无需提前配置，也无需指定路径——固定存放在
+`config.json` 同目录下的 `runtime-credentials.json`：启动后经 `/admin` 用 SSO
+登录或导入本机 kiro 凭据即可，代理会自动写入该文件并热重载生效。
 
-```bash
-./.venv/bin/uvicorn --env-file .env kiro_api_proxy.main:app \
-  --host 127.0.0.1 --port 3458
-```
+无需手写 `.env`——所有配置项均可选，留空即用默认值或由管理界面写入
+`config.json`。如需覆盖高级项（模型、超时、缓存等），可用环境变量或
+`--env-file`，见文末「配置」。
 
-服务启动后可访问 `http://127.0.0.1:3458/docs` 查看接口文档。未配置
-`RUNTIME_CREDENTIALS_FILE` 时服务启动即失败，不再回退到本地 kiro-cli。
+服务启动后可访问 `http://127.0.0.1:3458/docs` 查看接口文档。未配置凭据
+时可正常启动（先起服务、再经管理界面登录），但生成请求会失败。
 
 ## 安装
 
 安装目录结构如下，`venv` 使用非 editable 方式安装，配置和凭据统一放在
-`config/`，不要提交到 Git：
+`.config/`，不要提交到 Git：
 
 ```text
 <安装目录>/
-├── config/
-│   ├── .env
-│   ├── .env.proxy-api-key
-│   └── runtime-credentials.json
+├── .config/
+│   ├── config.json              # 服务配置（含 api_key），脚本预生成
+│   └── runtime-credentials.json # OIDC 凭据，程序自动回写刷新
 ├── scripts/
 └── venv/
 ```
@@ -52,7 +52,9 @@ cp .env.example .env
 ### macOS / Linux（推荐）
 
 在源码根目录执行交互式安装脚本，按提示输入安装目录、工作目录和凭据路径，
-脚本会自动创建 venv、生成 API 密钥、写入配置，并注册系统服务：
+脚本会自动创建 venv、生成 API 密钥写入 `config.json`，并注册系统服务
+（服务定义通过环境变量注入 `KIRO_PROXY_CONFIG_FILE`/`KIRO_WORKING_DIRECTORY`，
+不再需要 `.env`）：
 
 ```bash
 bash scripts/install.sh
@@ -63,7 +65,7 @@ bash scripts/install.sh
 ### Windows
 
 在源码根目录以 PowerShell 执行交互式安装脚本，按提示输入安装目录、工作目录和凭据路径，
-脚本会自动创建 venv、生成 API 密钥、写入配置，并注册登录时自动启动的计划任务：
+脚本会自动创建 venv、生成 API 密钥写入 `config.json`，并注册登录时自动启动的计划任务：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\install.ps1
@@ -114,8 +116,12 @@ powershell -ExecutionPolicy Bypass -File scripts\install.ps1
 
 服务从环境变量读取配置：
 
-- `PROXY_API_KEY`：代理接口 Bearer 密钥。也可用 `PROXY_API_KEY_FILE`
-  指向密钥文件（建议权限 `0600`）。
+- `PROXY_API_KEY`：代理接口 Bearer 密钥。留空则首次启动自动生成随机密钥
+  并写入 `config.json`（打印在启动日志），无需手动设置。`config.json` 中的
+  值优先于此环境变量。
+- `KIRO_PROXY_CONFIG_FILE`：管理端动态配置文件路径，其中的配置优先于
+  环境变量。默认 `~/.config/kiro-api-proxy/config.json`；安装脚本通过服务
+  定义的环境变量指向 `<安装目录>/.config/config.json`。
 - `DEFAULT_MODEL`：默认 `auto`。
 - `REQUEST_TIMEOUT_SECONDS`：请求绝对总超时，默认 `600`。
 - `KIRO_WORKING_DIRECTORY`：允许解析的工作目录根。Claude Code
@@ -128,10 +134,12 @@ powershell -ExecutionPolicy Bypass -File scripts\install.ps1
 - `MODEL_CACHE_TTL_SECONDS`：新鲜快照时间，默认 `300`。
 - `MODEL_CACHE_STALE_SECONDS`：上游失败时最大陈旧时间，默认 `3600`。
 - `INCREMENTAL_STREAMING`：标准增量 SSE，默认 `true`。
-- `RUNTIME_CREDENTIALS_FILE`：Runtime 凭据 JSON 文件路径（含
-  `refresh_token`、`client_id`、`client_secret`、`auth_region`、
-  `profile_arn`）。也可直接指向 Kiro Account Manager 的账户数组文件。
-  格式参见 `credentials.example.json`。未配置时服务启动即失败。
+- 凭据文件：**不可配置路径**，固定为 `config.json` 同目录下的
+  `runtime-credentials.json`，由程序（SSO 登录/导入/刷新回写）自动读写。
+  内容既支持单凭据对象（含 `refresh_token`、`client_id`、`client_secret`、
+  `auth_region`、`profile_arn`），也支持 Kiro Account Manager 的账户数组，
+  格式参见 `credentials.example.json`。未配置凭据时服务仍可正常启动（先起
+  服务、再经管理界面登录），但在此之前生成请求会失败。
 - `RUNTIME_ACCOUNT_INDEX`：凭据文件为账户数组时，指定要使用的零基账号
   索引；普通凭据对象留空。
 - `RUNTIME_ENDPOINT`：可选端点覆盖；留空时从 `profile_arn` 区域自动
@@ -145,6 +153,9 @@ powershell -ExecutionPolicy Bypass -File scripts\install.ps1
 `X-Claude-Code-Session-Id` 回传。
 
 ## 使用
+
+`$PROXY_API_KEY` 为鉴权密钥，取自首次启动日志或 `config.json` 中的
+`api_key`（也可在 `/admin` 管理界面查看）。
 
 ```bash
 curl http://127.0.0.1:3458/v1/chat/completions \

@@ -62,3 +62,20 @@ def test_parse_snapshot_zero_limit_no_divide():
     snap = _parse_snapshot(data)
     assert snap.usage_percent == 0.0
     assert snap.usage_current == 5.0
+
+
+def test_parse_snapshot_prefers_precision_fields():
+    """带精度字段（WithPrecision）应优先于取整字段，避免丢小数。"""
+    data = {
+        "usageBreakdownList": [
+            {
+                "currentUsage": 4946,
+                "currentUsageWithPrecision": 4946.35,
+                "usageLimit": 5000,
+                "usageLimitWithPrecision": 5000.0,
+            }
+        ]
+    }
+    snap = _parse_snapshot(data)
+    assert snap.usage_current == 4946.35
+    assert snap.usage_limit == 5000.0

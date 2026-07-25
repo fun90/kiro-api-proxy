@@ -76,6 +76,17 @@ body {
 
 .hidden { display: none !important; }
 
+.notice {
+  background: color-mix(in srgb, var(--error) 12%, var(--card));
+  border: 1px solid color-mix(in srgb, var(--error) 40%, var(--border));
+  color: var(--text);
+  border-radius: 10px;
+  padding: 12px 16px;
+  margin-bottom: 16px;
+  font-size: 13px;
+}
+.notice a { color: var(--accent); }
+
 .tabs { display: flex; gap: 4px; margin-bottom: 16px; flex-wrap: wrap; }
 .tab {
   background: transparent;
@@ -135,3 +146,15 @@ code { background: var(--track); padding: 1px 5px; border-radius: 4px; font-size
 .usage-bar { height: 10px; background: var(--track); border-radius: 6px; overflow: hidden; margin-bottom: 6px; }
 .usage-fill { height: 100%; background: var(--accent); transition: width 0.3s; }
 .usage-pct { font-size: 13px; color: var(--muted); margin: 0 0 12px; }
+
+.local-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 0;
+  border-top: 1px solid var(--border);
+}
+.local-item:first-of-type { border-top: none; }
+.local-meta { min-width: 0; word-break: break-all; font-size: 13px; }
+.local-meta .muted { font-size: 12px; }

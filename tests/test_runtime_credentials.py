@@ -150,6 +150,17 @@ def test_load_no_warning_on_strict_permissions(tmp_path: Path, caplog):
     assert "权限过宽" not in caplog.text
 
 
+def test_parse_expires_at_iso_with_millis(tmp_path: Path):
+    """kiro cli/ide 的 ISO 带毫秒 expires_at（单对象路径）能正确解析，不崩溃。"""
+    data = dict(VALID_CREDENTIALS)
+    data["expires_at"] = "2026-07-25T14:10:01.899Z"
+    path = tmp_path / "iso.json"
+    path.write_text(json.dumps(data), encoding="utf-8")
+    creds = load_credentials(str(path))
+    # 2026-07-25T14:10:01Z 的 Unix 秒约为 1784., 只要求成功解析为正数。
+    assert creds.expires_at > 1_700_000_000
+
+
 def test_endpoint_region_from_profile_arn():
     creds = RuntimeCredentials(
         refresh_token="rt",

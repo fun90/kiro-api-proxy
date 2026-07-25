@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from kiro_api_proxy.admin.config_store import ConfigStore
 
 
@@ -66,3 +68,32 @@ def test_corrupt_file_falls_back(tmp_path: Path):
     path.write_text("{not json", encoding="utf-8")
     store = ConfigStore(path)
     assert store.get().api_port == 3458
+
+
+def test_api_key_empty_by_default(tmp_path: Path, monkeypatch):
+    """未配置时 api_key 默认为空，不再随实例化自动生成。"""
+    import dataclasses
+
+    from kiro_api_proxy.admin import config_store as cs
+
+    # Settings 为 frozen dataclass，用 replace 造一个 api_key 为空的副本替换模块引用，
+    # 隔离测试环境里可能存在的 PROXY_API_KEY。
+    monkeypatch.setattr(cs, "settings", dataclasses.replace(cs.settings, api_key=""))
+    store = ConfigStore(tmp_path / "config.json")
+    assert store.get().api_key == ""
+
+
+def test_credentials_path_next_to_config(tmp_path: Path):
+    """凭据路径固定为 config.json 同目录下的 runtime-credentials.json。"""
+    path = tmp_path / "sub" / "config.json"
+    store = ConfigStore(path)
+    assert store.credentials_path == tmp_path / "sub" / "runtime-credentials.json"
+    # get() 返回的凭据路径即推导值。
+    assert store.get().runtime_credentials_file == str(store.credentials_path)
+
+
+def test_update_rejects_credentials_file(tmp_path: Path):
+    """凭据路径不可配置：写入已移除的字段应报错。"""
+    store = ConfigStore(tmp_path / "config.json")
+    with pytest.raises(KeyError):
+        store.update(runtime_credentials_file="/somewhere/else.json")

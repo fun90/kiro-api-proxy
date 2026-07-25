@@ -31,15 +31,10 @@ class Settings:
 
     @classmethod
     def from_env(cls) -> "Settings":
-        api_key = os.getenv("PROXY_API_KEY", "")
-        api_key_file = os.getenv("PROXY_API_KEY_FILE", "")
-        if not api_key and api_key_file:
-            try:
-                api_key = Path(api_key_file).read_text().strip()
-            except OSError:
-                api_key = ""
+        # api_key 默认为空、不再自动生成；未配置时管理接口放行，需在 /admin
+        # 管理界面生成并保存后才启用鉴权。
         return cls(
-            api_key=api_key,
+            api_key=os.getenv("PROXY_API_KEY", ""),
             default_model=os.getenv("DEFAULT_MODEL", "auto"),
             timeout_seconds=float(os.getenv("REQUEST_TIMEOUT_SECONDS", "600")),
             working_directory=os.getenv(
@@ -55,7 +50,9 @@ class Settings:
                 os.getenv("MODEL_CACHE_STALE_SECONDS", "3600")
             ),
             incremental_streaming=_bool("INCREMENTAL_STREAMING", True),
-            runtime_credentials_file=os.getenv("RUNTIME_CREDENTIALS_FILE", ""),
+            # 凭据路径固定为 config.json 同目录（见 config_store.credentials_path），
+            # 不再从环境变量读；此字段仅由 _reload_transport 以推导值填充。
+            runtime_credentials_file="",
             runtime_account_index=(
                 int(os.environ["RUNTIME_ACCOUNT_INDEX"])
                 if os.getenv("RUNTIME_ACCOUNT_INDEX", "").strip()

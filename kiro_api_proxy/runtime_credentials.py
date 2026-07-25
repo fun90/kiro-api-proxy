@@ -137,7 +137,7 @@ def load_credentials(
         auth_region=data["auth_region"],
         profile_arn=data["profile_arn"],
         access_token=data.get("access_token", ""),
-        expires_at=float(data.get("expires_at", 0)),
+        expires_at=_parse_expires_at(data.get("expires_at", 0)),
         source_index=source_index,
     )
 
@@ -146,6 +146,12 @@ def _parse_expires_at(value: object) -> float:
     if isinstance(value, (int, float)):
         return float(value)
     if isinstance(value, str) and value:
+        # ISO 8601（含带毫秒与 Z 的 kiro cli/ide 格式，如
+        # 2026-07-25T14:10:01.899Z）。Python 3.11 的 fromisoformat 支持 Z。
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            pass
         for pattern in ("%Y/%m/%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S%z"):
             try:
                 return datetime.strptime(value, pattern).timestamp()

@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
@@ -78,6 +78,15 @@ def _float(value: Any) -> float:
     return 0.0
 
 
+def _pick_float(source: dict[str, Any], *keys: str) -> float:
+    """按顺序取第一个有效数字字段；带精度字段（WithPrecision）应排在前。"""
+    for key in keys:
+        value = source.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return float(value)
+    return 0.0
+
+
 def _reset_date(value: Any) -> str:
     """把 nextDateReset（Unix 秒，可能是字符串）转为 YYYY-MM-DD。"""
     try:
@@ -128,15 +137,25 @@ def _parse_snapshot(data: dict[str, Any]) -> UsageSnapshot:
         if isinstance(breakdown, dict):
             snap.resource_type = str(breakdown.get("resourceType", ""))
             snap.currency = str(breakdown.get("currency", ""))
-            snap.usage_current = _float(breakdown.get("currentUsage"))
-            snap.usage_limit = _float(breakdown.get("usageLimit"))
+            # 优先取带精度字段（如 currentUsageWithPrecision=4946.35），
+            # 退回整数字段（currentUsage=4946）。
+            snap.usage_current = _pick_float(
+                breakdown, "currentUsageWithPrecision", "currentUsage"
+            )
+            snap.usage_limit = _pick_float(
+                breakdown, "usageLimitWithPrecision", "usageLimit"
+            )
             if snap.usage_limit > 0:
                 snap.usage_percent = snap.usage_current / snap.usage_limit
             trial = breakdown.get("freeTrialInfo")
             if isinstance(trial, dict):
                 snap.trial_status = str(trial.get("freeTrialStatus", ""))
-                snap.trial_usage_current = _float(trial.get("currentUsage"))
-                snap.trial_usage_limit = _float(trial.get("usageLimit"))
+                snap.trial_usage_current = _pick_float(
+                    trial, "currentUsageWithPrecision", "currentUsage"
+                )
+                snap.trial_usage_limit = _pick_float(
+                    trial, "usageLimitWithPrecision", "usageLimit"
+                )
 
     snap.next_reset_date = _reset_date(data.get("nextDateReset"))
     return snap
