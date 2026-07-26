@@ -66,12 +66,16 @@ class TokenUsage:
             )
 
     def ensure_estimates(self, prompt: str, output: str) -> None:
-        # 持久会话中的 input_tokens 可能只统计本轮新增输入，而
-        # context_tokens（usage_update.used）才是客户端需要展示的累计占用，
-        # 取两者较大值即可；都缺失时才退回字符级估算。
-        self.input_tokens = max(self.input_tokens, self.context_tokens)
-        if self.input_tokens <= 0:
-            self.input_tokens = estimate_tokens(prompt)
+        # 上游（Kiro）上报的 inputTokens 常严重低估：它可能未计入系统提示、
+        # 完整历史等实际发送内容，导致与真实 prompt 规模相差数倍。为避免向客户端
+        # 透传失真的低值，input_tokens 取「上游上报值、累计上下文占用、prompt
+        # 字符估算」三者的最大值——字符估算既是三者皆缺时的兜底，也是上游低估时的纠偏。
+        self.input_tokens = max(
+            self.input_tokens,
+            self.context_tokens,
+            estimate_tokens(prompt),
+        )
+        # output_tokens 数自模型自身生成，上游一般不低估，故仅在缺失时才估算。
         if self.output_tokens <= 0:
             self.output_tokens = estimate_tokens(output)
 

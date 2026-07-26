@@ -29,6 +29,23 @@ def test_ensure_estimates_falls_back_to_char_estimate():
     assert usage.input_tokens == estimate_tokens("你好世界")
 
 
+def test_ensure_estimates_corrects_upstream_underreport():
+    prompt = "这是一段很长的提示。" * 200
+    usage = TokenUsage(input_tokens=15, context_tokens=0)
+    usage.ensure_estimates(prompt, "输出")
+    # 上游严重低估（如 Kiro 未计入系统提示）时，用字符估算纠偏。
+    assert usage.input_tokens == estimate_tokens(prompt)
+    assert usage.input_tokens > 15
+
+
+def test_ensure_estimates_keeps_upstream_value_when_higher():
+    prompt = "短"
+    usage = TokenUsage(input_tokens=99999, context_tokens=0)
+    usage.ensure_estimates(prompt, "输出")
+    # 上游值高于字符估算时不被拉低。
+    assert usage.input_tokens == 99999
+
+
 def test_anthropic_usage_includes_cache_fields():
     usage = TokenUsage(
         input_tokens=120,
