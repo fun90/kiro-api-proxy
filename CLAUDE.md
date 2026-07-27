@@ -45,7 +45,8 @@ python -m venv .venv
 ## 关键不变量
 
 - **工具通道分离**：工具的定义、调用、结果只走 `GenerationRequest.tools/tool_results/history` 与 `EventType.TOOL`，永远不进 prompt 文本。修改 `prompts.content_text` 或 `tools.py` 时务必保持这一点。
-- **Token 用量优先用上游真实值**：`usage.TokenUsage` 与 `event_mapper` 的 usage 提取都遵循「缺失字段不覆盖已累积真实值、不补 0」。`ensure_estimates` 只在上游完全没给时才做字符级估算，且 `input_tokens` 取 `max(input_tokens, context_tokens)`（长会话里 `used`/`context_tokens` 才是累计占用）。`/v1/messages/count_tokens` 是纯本地估算，不调上游。
+- **Token 用量优先用上游真实值**：`usage.TokenUsage` 与 `event_mapper` 的 usage 提取都遵循「缺失字段不覆盖已累积真实值、不补 0」。`ensure_estimates` 的 `input_tokens` 优先级是 `max(占比换算值, context_tokens, input_tokens)`，三者全为 0 时才退回 prompt 字符估算——**字符估算只是兜底，绝不能覆盖上游真实值**（客户端靠 `input_tokens` 判断压缩时机，注入估算值会让时机偏离真实占用）。`/v1/messages/count_tokens` 是纯本地估算，不调上游。
+- **上下文占比换算**：上游 `contextUsageEvent` 只给浮点百分比 `contextUsagePercentage`（不给绝对 token 数），`event_mapper` 必须与整型 token 字段分开提取（浮点过不了 `isinstance(value, int)`），由 `TokenUsage.context_usage_tokens(model)` 乘上下文窗口换算成绝对值。窗口优先取上游 `usageEvent` 的 `size`，缺失时由 `usage.context_window_for_model` 按模型版本判档：Claude ≥ 4.6（含 major ≥ 5）为 1M，4.5 及更早为 200K；版本正则同时认 `4.8` 与 `4-8` 两种写法，所以传未经 `resolve_model` 归一的客户端模型名也能判对。**档位判错会成倍失真**（opus-4.8 当成 200K 会低估 5 倍，导致客户端压缩不及时）。`config.default_context_window` 只用于 `/v1/models` 回显兜底，不参与此换算。
 - **Token 刷新**：`token_provider.py` 单航班刷新（`asyncio.Lock` + 双重检查）+ 文件原子回写；`runtime.py` 首次 401 会 `force_refresh` 后重放一次。改认证流程要保住「并发只刷一次」和「回写不破坏账户数组其他项」。
 - **模型缓存**：`model_cache.py` TTL + single-flight + stale-if-error；本地凭据文件 mtime 变化会自动失效缓存（`main.available_models`）。
 - **思考 / 模型别名**：`main.resolve_model` 处理 `-thinking` 后缀（触发 effort）、`[1m]` 后缀、`claude-opus-4-8`→`claude-opus-4.8` 等点号别名。Anthropic 侧 `thinking.type` 也会映射成 `-thinking`（`prompts.anthropic_upstream_model`）。
@@ -61,7 +62,7 @@ python -m venv .venv
 
 ## 管理界面（admin 子包）
 
-挂在 `/admin`（静态页 `admin/static/`）与 `/admin/api/*`（`admin/routes.py`）。能力：改配置、查额度（`admin/usage.py`）、SSO 登录换凭据（`admin/sso.py`）、粘贴导入或扫描本机 kiro-cli/ide 凭据（`admin/credentials_import.py`、`admin/local_import.py`）。单凭据缺 `profile_arn` 时用 refresh_token 刷新补全。`main.py` 里 `include_router` 在所有 `@app` 路由之后、`StaticFiles` 挂载之前注册，顺序不能乱，否则会抢占 `/admin/api/*`。
+挂在 `/admin`（静态页 `admin/static/`）与 `/admin/api/*`（`admin/routes.py`）。能力：改配置、查额度（`admin/usage.py`）、SSO 登录换凭据（`admin/sso.py`）、扫描并导入本机 kiro-cli/ide 凭据（`admin/local_import.py`，落盘与补全走 `admin/credentials_import.py`）。单凭据缺 `profile_arn` 时用 refresh_token 刷新补全。`main.py` 里 `include_router` 在所有 `@app` 路由之后、`StaticFiles` 挂载之前注册，顺序不能乱，否则会抢占 `/admin/api/*`。
 
 ## 会话与工作目录
 

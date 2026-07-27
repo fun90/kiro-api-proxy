@@ -104,8 +104,13 @@ powershell -ExecutionPolicy Bypass -File scripts\install.ps1
 - Claude API 支持文本消息、system、Thinking 映射、原生工具调用及 SSE。
 - 流式与非流式响应优先采用上游上报的真实 token 用量：`message_delta`／
   `usage` 回传 `input_tokens`、缓存与 `output_tokens`，供客户端准确计算
-  会话上下文占用；上游未提供时优先采用其上报的上下文用量（`used`），
-  再退回按 Prompt 与输出文本估算。`/v1/messages/count_tokens`
+  会话上下文占用。`input_tokens` 按「上游上下文占比换算值、上游累计上下文
+  用量（`used`）、上游本轮 `inputTokens`」三者取最大值，仅在三者皆缺时才
+  退回按 Prompt 字符估算。其中占比换算来自上游 `contextUsageEvent` 的
+  `contextUsagePercentage`（只给百分比，不给绝对值），乘以上下文窗口得到
+  绝对 token 数：窗口优先取上游上报的 `size`，缺失时按模型版本判档——
+  Claude 4.6 及更新为 1000000，4.5 及更早为 200000，`claude-opus-4.8` 与
+  `claude-opus-4-8` 两种写法都能识别。`/v1/messages/count_tokens`
   为请求前预估接口，无上游调用，始终使用字符级估算。
 - OpenAI Chat Completions 在 `stream_options.include_usage=true` 时于
   `[DONE]` 前返回最终用量 chunk；Responses 流的 `response.completed`

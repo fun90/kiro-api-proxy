@@ -513,7 +513,7 @@ async def _collect_generation(
                 detail=event.text,
             )
     content = "".join(parts).strip()
-    usage.ensure_estimates(prompt, content)
+    usage.ensure_estimates(prompt, content, model)
     return content, usage, tool_calls.calls()
 
 
@@ -648,7 +648,7 @@ async def chat_stream(
                 finish_reason="tool_calls" if tool_index else "stop",
             )
             if include_usage:
-                usage.ensure_estimates(prompt, "".join(output_parts))
+                usage.ensure_estimates(prompt, "".join(output_parts), model)
                 yield chat_chunk(
                     completion_id,
                     created,
@@ -840,7 +840,9 @@ async def anthropic_stream(
             },
         )
         return
-    usage.ensure_estimates(prompt, "".join(output_parts))
+    usage.ensure_estimates(
+        prompt, "".join(output_parts), anthropic_upstream_model(request)
+    )
     closed = close_open()
     if closed:
         yield closed
@@ -989,7 +991,7 @@ async def responses_stream(
             )
             return
     output_text = "".join(text_parts)
-    usage.ensure_estimates(prompt, output_text)
+    usage.ensure_estimates(prompt, output_text, request.model)
     yield event(
         "response.output_text.done",
         {

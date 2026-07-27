@@ -147,6 +147,25 @@ def map_event(message: EventStreamMessage) -> Iterator[GenerationEvent]:
                         break
                 if target in usage_data:
                     break
+        # contextUsageEvent 只给浮点百分比，不给绝对 token 数；它是长会话里唯一
+        # 反映真实上下文占用的信号，绝对值由 TokenUsage 乘模型窗口换算。
+        for source in sources:
+            for alias in (
+                "contextUsagePercentage",
+                "context_usage_percentage",
+                "contextUsagePercent",
+                "context_percent",
+            ):
+                value = source.get(alias)
+                if (
+                    isinstance(value, (int, float))
+                    and not isinstance(value, bool)
+                    and value >= 0
+                ):
+                    usage_data["context_percent"] = float(value)
+                    break
+            if "context_percent" in usage_data:
+                break
         if isinstance(raw_usage, (int, float)) and not isinstance(raw_usage, bool):
             usage_data["credits"] = float(raw_usage)
         if usage_data:
