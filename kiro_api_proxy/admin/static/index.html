@@ -98,21 +98,6 @@
           <p class="error" id="ssoError"></p>
           <p class="ok" id="ssoOk"></p>
         </div>
-
-        <div class="card">
-          <h2>导入凭据 JSON</h2>
-          <p class="muted">上传 JSON 文件或直接粘贴凭据对象／Kiro Account Manager 账户数组。</p>
-          <div class="row">
-            <input type="file" id="credFile" accept=".json,application/json">
-          </div>
-          <textarea id="credJson" rows="8" placeholder='{ "refresh_token": "...", "client_id": "...", "client_secret": "...", "auth_region": "us-east-1", "profile_arn": "arn:aws:codewhisperer:..." }'></textarea>
-          <div class="row">
-            <input type="number" id="credIndex" placeholder="账户索引（数组时可选）" min="0">
-            <button id="credImportBtn">导入并保存</button>
-          </div>
-          <p class="error" id="credError"></p>
-          <p class="ok" id="credOk"></p>
-        </div>
       </section>
 
       <!-- 设置 -->

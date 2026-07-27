@@ -1,10 +1,8 @@
-"""凭据导入。
+"""凭据落盘与补全。
 
-支持三类来源，最终都归一化为 RuntimeCredentials 所需的 snake_case 字段：
-1. 粘贴/上传的凭据 JSON（snake_case 或 camelCase 单对象、Kiro Account
-   Manager 账户数组）；
-2. kiro cli / kiro ide 的 AWS SSO 缓存（token 文件 + client 文件配对，
-   见 local_import）。
+凭据来源为 SSO 登录换取的凭据，或 kiro cli / kiro ide 的 AWS SSO 缓存
+（token 文件 + client 文件配对，见 local_import）；两者最终都归一化为
+RuntimeCredentials 所需的 snake_case 字段。
 
 写入前先在临时文件上用 load_credentials 完整校验，通过后再原子替换目标
 文件，避免坏凭据覆盖已有的有效凭据。写入后收紧权限为 0600。
@@ -104,57 +102,6 @@ def write_credentials(
 
     temp_path.replace(path)
     return path, credentials.source_index
-
-
-def import_credentials(
-    raw_json: str,
-    target_file: str = "",
-    account_index: int | None = None,
-) -> tuple[Path, int | None]:
-    """校验并写入凭据 JSON（同步、无网络）。
-
-    单对象会先做 camelCase → snake_case 归一化；账户数组原样交由
-    load_credentials 处理。profile_arn 缺失时不在此补全（见
-    import_credentials_completing）。
-
-    Raises:
-        CredentialImportError: JSON 非法、结构错误或必需字段缺失。
-    """
-    data = _parse_raw(raw_json)
-    if isinstance(data, dict):
-        data = normalize_fields(data)
-    return write_credentials(data, target_file, account_index)
-
-
-async def import_credentials_completing(
-    raw_json: str,
-    target_file: str = "",
-    account_index: int | None = None,
-) -> tuple[Path, int | None]:
-    """校验并写入凭据 JSON；单对象缺 profile_arn 时刷新补全后再写入。
-
-    Raises:
-        CredentialImportError: JSON 非法、结构错误、补全失败或校验失败。
-    """
-    data = _parse_raw(raw_json)
-    if isinstance(data, dict):
-        data = normalize_fields(data)
-        if not data.get("profile_arn"):
-            data = await complete_profile(data)
-    return write_credentials(data, target_file, account_index)
-
-
-def _parse_raw(raw_json: str) -> dict | list:
-    text = raw_json.strip()
-    if not text:
-        raise CredentialImportError("凭据内容为空")
-    try:
-        data = json.loads(text)
-    except json.JSONDecodeError as exc:
-        raise CredentialImportError(f"JSON 格式无效: {exc}") from exc
-    if not isinstance(data, (dict, list)):
-        raise CredentialImportError("凭据内容必须是 JSON 对象或账户数组")
-    return data
 
 
 async def complete_profile(fields: dict) -> dict:
@@ -282,8 +229,6 @@ __all__ = [
     "CredentialImportError",
     "complete_profile",
     "default_credentials_path",
-    "import_credentials",
-    "import_credentials_completing",
     "normalize_fields",
     "write_credentials",
 ]

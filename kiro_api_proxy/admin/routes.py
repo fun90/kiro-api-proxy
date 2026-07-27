@@ -13,7 +13,6 @@ invalid_redirect_uri），所以它不能带 /admin/api 前缀。
 from __future__ import annotations
 
 import html
-import json
 import sys
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -27,8 +26,6 @@ from .config_store import store
 from .credentials_import import (
     CredentialImportError,
     complete_profile,
-    import_credentials,
-    import_credentials_completing,
     write_credentials,
 )
 from .local_import import find_local_credential, scan_local_credentials
@@ -141,12 +138,6 @@ class SsoCompleteRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     session_id: str
     callback_url: str
-
-
-class CredentialsImportRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    content: str
-    account_index: int | None = None
 
 
 class LocalImportRequest(BaseModel):
@@ -355,24 +346,6 @@ async def sso_complete(
     return {"success": True, "path": str(path), "profile_arn": credentials.profile_arn}
 
 
-@router.post("/credentials/import")
-async def credentials_import(
-    req: CredentialsImportRequest,
-    _: None = Depends(require_admin_auth),
-) -> dict:
-    # 单对象缺 profile_arn 时（kiro cli/ide 凭据）用 refresh_token 刷新补全。
-    try:
-        path, source_index = await import_credentials_completing(
-            req.content, str(store.credentials_path), req.account_index
-        )
-    except CredentialImportError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    # 凭据路径固定（config.json 同目录），仅记录账户索引并重载传输。
-    store.update(runtime_account_index=source_index)
-    await _trigger_reload()
-    return {"success": True, "path": str(path), "source_index": source_index}
-
-
 @router.get("/credentials/scan")
 async def credentials_scan(
     _: None = Depends(require_admin_auth),
@@ -415,7 +388,7 @@ def _persist_sso_credentials(credentials: SsoCredentials) -> Path:
         "access_token": credentials.access_token,
         "expires_at": credentials.expires_at,
     }
-    path, _ = import_credentials(json.dumps(payload), str(store.credentials_path))
+    path, _ = write_credentials(payload, str(store.credentials_path))
     # SSO 写入的是单凭据对象，清除账户索引避免指向不存在的数组项。
     store.update(runtime_account_index=None)
     return path

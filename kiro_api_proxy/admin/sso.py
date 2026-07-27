@@ -373,7 +373,7 @@ class SsoLoginManager:
             last_error = f"{region}: 返回空 profile 列表"
         raise SsoError(
             f"获取 Profile 失败（{last_error or '账户下无 profile'}），"
-            "可尝试改用粘贴凭据 JSON 方式"
+            "可尝试改用从本机 Kiro 登录导入方式"
         )
 
 

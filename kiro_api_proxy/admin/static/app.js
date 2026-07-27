@@ -330,47 +330,6 @@ async function importLocal(id, btn) {
   }
 }
 
-// ---- 凭据导入 ----
-
-// 选中文件后读取文本填入文本框，随后走与粘贴一致的导入流程。
-function handleCredFile(e) {
-  setText("credError", "");
-  setText("credOk", "");
-  const file = e.target.files && e.target.files[0];
-  if (!file) return;
-  const reader = new FileReader();
-  reader.onload = () => {
-    $("credJson").value = String(reader.result || "");
-    setText("credOk", `已载入文件 ${file.name}，点击“导入并保存”确认`, "ok");
-  };
-  reader.onerror = () => setText("credError", "读取文件失败");
-  reader.readAsText(file);
-}
-
-async function importCredentials() {
-  setText("credError", "");
-  setText("credOk", "");
-  const content = $("credJson").value.trim();
-  if (!content) {
-    setText("credError", "请粘贴凭据 JSON");
-    return;
-  }
-  const indexRaw = $("credIndex").value.trim();
-  try {
-    const res = await api("/credentials/import", {
-      method: "POST",
-      body: JSON.stringify({
-        content,
-        account_index: indexRaw === "" ? null : Number(indexRaw),
-      }),
-    });
-    setText("credOk", `导入成功，已保存到 ${res.path}`, "ok");
-    refreshStatus();
-  } catch (err) {
-    setText("credError", err.message);
-  }
-}
-
 // ---- 设置 ----
 
 async function loadSettings() {
@@ -597,8 +556,6 @@ function init() {
     if (savedUrl) $("ssoStartUrl").value = savedUrl;
     if (savedRegion) $("ssoRegion").value = savedRegion;
   } catch (_) {}
-  $("credFile").addEventListener("change", handleCredFile);
-  $("credImportBtn").addEventListener("click", importCredentials);
   $("saveSettings").addEventListener("click", saveSettings);
   $("toggleApiKey").addEventListener("click", toggleApiKeyVisibility);
   $("genApiKey").addEventListener("click", generateApiKey);
