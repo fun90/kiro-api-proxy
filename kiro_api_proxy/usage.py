@@ -66,15 +66,13 @@ class TokenUsage:
             )
 
     def ensure_estimates(self, prompt: str, output: str) -> None:
-        # 上游（Kiro）上报的 inputTokens 常严重低估：它可能未计入系统提示、
-        # 完整历史等实际发送内容，导致与真实 prompt 规模相差数倍。为避免向客户端
-        # 透传失真的低值，input_tokens 取「上游上报值、累计上下文占用、prompt
-        # 字符估算」三者的最大值——字符估算既是三者皆缺时的兜底，也是上游低估时的纠偏。
-        self.input_tokens = max(
-            self.input_tokens,
-            self.context_tokens,
-            estimate_tokens(prompt),
-        )
+        # input_tokens 优先级：上游累计上下文占用（used）> 上游本轮 inputTokens
+        # > prompt 字符估算。前两者都是上游真实值，取较大者（长会话里 used 才是
+        # 累计占用）；字符估算只在两者皆缺时兜底，绝不用来覆盖上游真实值——
+        # 客户端靠 input_tokens 决定何时压缩上下文，注入估算值会让压缩时机偏离
+        # 真实占用。
+        upstream = max(self.context_tokens, self.input_tokens)
+        self.input_tokens = upstream if upstream > 0 else estimate_tokens(prompt)
         # output_tokens 数自模型自身生成，上游一般不低估，故仅在缺失时才估算。
         if self.output_tokens <= 0:
             self.output_tokens = estimate_tokens(output)

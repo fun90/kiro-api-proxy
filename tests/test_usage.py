@@ -29,13 +29,13 @@ def test_ensure_estimates_falls_back_to_char_estimate():
     assert usage.input_tokens == estimate_tokens("你好世界")
 
 
-def test_ensure_estimates_corrects_upstream_underreport():
+def test_ensure_estimates_keeps_upstream_value_over_char_estimate():
     prompt = "这是一段很长的提示。" * 200
     usage = TokenUsage(input_tokens=15, context_tokens=0)
     usage.ensure_estimates(prompt, "输出")
-    # 上游严重低估（如 Kiro 未计入系统提示）时，用字符估算纠偏。
-    assert usage.input_tokens == estimate_tokens(prompt)
-    assert usage.input_tokens > 15
+    # 上游给了真实值就照用，字符估算只是兜底，不能反过来覆盖上游值——
+    # 客户端靠 input_tokens 判断压缩时机，注入估算值会让时机偏离真实占用。
+    assert usage.input_tokens == 15
 
 
 def test_ensure_estimates_keeps_upstream_value_when_higher():
