@@ -21,6 +21,10 @@ class EventType(StrEnum):
     USAGE = "usage"
     DONE = "done"
     ERROR = "error"
+    # HEARTBEAT 是代理自身注入的空档心跳事件，不来自上游。出站层把它
+    # 编码成 SSE 注释行（": ...\n\n"），仅用于避免下游客户端读超时，
+    # 所有 SSE 客户端都会忽略注释行，对各协议语义无影响。
+    HEARTBEAT = "heartbeat"
 
 
 class ErrorCategory(StrEnum):

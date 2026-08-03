@@ -332,6 +332,14 @@ async def _events(
             return
         upstream = transport.stream(generation)
         deadline = asyncio.get_running_loop().time() + settings.timeout_seconds
+        # 空档心跳：上游长时间无事件时，每隔 heartbeat_seconds 向下游发一个
+        # HEARTBEAT，避免下游客户端 SSE 读超时。<=0 关闭。
+        heartbeat_interval = settings.heartbeat_seconds
+        next_heartbeat = (
+            asyncio.get_running_loop().time() + heartbeat_interval
+            if heartbeat_interval > 0
+            else None
+        )
         next_event: asyncio.Task[GenerationEvent] | None = None
         try:
             while True:
@@ -369,10 +377,26 @@ async def _events(
                         )
                         _log("client_disconnected", transport=transport.name)
                         return
-                    await asyncio.wait(
-                        {next_event},
-                        timeout=min(0.25, remaining),
-                    )
+                    if (
+                        next_heartbeat is not None
+                        and asyncio.get_running_loop().time() >= next_heartbeat
+                    ):
+                        next_heartbeat = (
+                            asyncio.get_running_loop().time()
+                            + heartbeat_interval
+                        )
+                        yield GenerationEvent(EventType.HEARTBEAT)
+                    poll = min(0.25, remaining)
+                    if next_heartbeat is not None:
+                        poll = min(
+                            poll,
+                            max(
+                                0.0,
+                                next_heartbeat
+                                - asyncio.get_running_loop().time(),
+                            ),
+                        )
+                    await asyncio.wait({next_event}, timeout=poll)
                 try:
                     event = next_event.result()
                 except StopAsyncIteration:
@@ -413,6 +437,11 @@ async def _events(
                     )
                 if event.type is EventType.USAGE:
                     saw_usage = True
+                # 真实事件流动后重置心跳计时，从最近一次活动重新计间隔。
+                if next_heartbeat is not None:
+                    next_heartbeat = (
+                        asyncio.get_running_loop().time() + heartbeat_interval
+                    )
                 yield event
         finally:
             if next_event is not None and not next_event.done():
@@ -557,7 +586,9 @@ async def chat_stream(
             )
         )
         async for event in _events(*event_args):
-            if event.type is EventType.TEXT_DELTA:
+            if event.type is EventType.HEARTBEAT:
+                yield ": keep-alive\n\n"
+            elif event.type is EventType.TEXT_DELTA:
                 output_parts.append(event.text)
                 yield chat_chunk(completion_id, created, model, event.text)
             elif event.type is EventType.TOOL:
@@ -711,6 +742,9 @@ async def anthropic_stream(
             )
         )
         async for event in _events(*event_args):
+            if event.type is EventType.HEARTBEAT:
+                yield ": keep-alive\n\n"
+                continue
             if event.type is EventType.TEXT_DELTA:
                 output_parts.append(event.text)
                 if open_kind != "text":
@@ -914,6 +948,9 @@ async def responses_stream(
         )
     )
     async for item in _events(*event_args):
+        if item.type is EventType.HEARTBEAT:
+            yield ": keep-alive\n\n"
+            continue
         if item.type is EventType.TEXT_DELTA:
             sequence += 1
             text_parts.append(item.text)

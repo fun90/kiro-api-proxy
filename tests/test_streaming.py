@@ -405,3 +405,96 @@ async def test_slow_consumer_keeps_chunk_order(monkeypatch):
         await asyncio.sleep(0.001)
     assert values[0].find('"你"') < len(values[0])
     assert values[1].find('"好"') < len(values[1])
+
+
+async def test_events_injects_heartbeat_during_upstream_silence(monkeypatch):
+    release = asyncio.Event()
+
+    class FakeTransport:
+        name = "fake"
+
+        async def stream(self, request):
+            await release.wait()
+            yield GenerationEvent(EventType.TEXT_DELTA, text="你好")
+            yield GenerationEvent(EventType.DONE)
+
+    async def valid_model(model):
+        return None
+
+    monkeypatch.setattr(main, "transport", FakeTransport())
+    monkeypatch.setattr(main, "ensure_model", valid_model)
+    # 心跳间隔极短，总时长上限足够长，确保空档期先冒出心跳。
+    monkeypatch.setattr(
+        main,
+        "settings",
+        replace(main.settings, heartbeat_seconds=0.02, timeout_seconds=5),
+    )
+
+    collected: list[GenerationEvent] = []
+
+    async def consume():
+        async for item in main._events("auto", "静默", None):
+            collected.append(item)
+
+    task = asyncio.create_task(consume())
+    # 让空档持续足够触发若干次心跳。
+    await asyncio.sleep(0.1)
+    assert any(e.type is EventType.HEARTBEAT for e in collected)
+    release.set()
+    await task
+    # 上游文本最终仍被送达。
+    assert any(
+        e.type is EventType.TEXT_DELTA and e.text == "你好" for e in collected
+    )
+
+
+async def test_heartbeat_disabled_when_zero(monkeypatch):
+    release = asyncio.Event()
+
+    class FakeTransport:
+        name = "fake"
+
+        async def stream(self, request):
+            await release.wait()
+            yield GenerationEvent(EventType.DONE)
+
+    async def valid_model(model):
+        return None
+
+    monkeypatch.setattr(main, "transport", FakeTransport())
+    monkeypatch.setattr(main, "ensure_model", valid_model)
+    monkeypatch.setattr(
+        main,
+        "settings",
+        replace(main.settings, heartbeat_seconds=0, timeout_seconds=5),
+    )
+
+    collected: list[GenerationEvent] = []
+
+    async def consume():
+        async for item in main._events("auto", "静默", None):
+            collected.append(item)
+
+    task = asyncio.create_task(consume())
+    await asyncio.sleep(0.1)
+    assert not any(e.type is EventType.HEARTBEAT for e in collected)
+    release.set()
+    await task
+
+
+async def test_chat_stream_translates_heartbeat_to_comment(monkeypatch):
+    async def heartbeat_events(*args, **kwargs):
+        yield GenerationEvent(EventType.HEARTBEAT)
+        yield GenerationEvent(EventType.TEXT_DELTA, text="你好")
+        yield GenerationEvent(EventType.DONE)
+
+    monkeypatch.setattr(main, "_events", heartbeat_events)
+    chunks = [
+        chunk
+        async for chunk in main.chat_stream(
+            "auto", "提示", "chatcmpl-test", 1
+        )
+    ]
+    assert chunks[0] == ": keep-alive\n\n"
+    assert any('"content": "你好"' in c for c in chunks)
+    assert chunks[-1] == "data: [DONE]\n\n"

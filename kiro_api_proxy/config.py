@@ -17,6 +17,7 @@ class Settings:
     api_key: str
     default_model: str
     timeout_seconds: float
+    heartbeat_seconds: float
     working_directory: str
     effort: str
     response_language: str
@@ -37,6 +38,10 @@ class Settings:
             api_key=os.getenv("PROXY_API_KEY", ""),
             default_model=os.getenv("DEFAULT_MODEL", "auto"),
             timeout_seconds=float(os.getenv("REQUEST_TIMEOUT_SECONDS", "600")),
+            # SSE 空档心跳间隔（秒）。上游长时间无输出（首 token 未到、
+            # thinking）时，每隔该间隔向下游发一个 SSE 注释行，避免下游
+            # 客户端读超时（SSE read timed out）。设为 0 关闭心跳。
+            heartbeat_seconds=float(os.getenv("SSE_HEARTBEAT_SECONDS", "15")),
             working_directory=os.getenv(
                 "KIRO_WORKING_DIRECTORY", str(Path.cwd())
             ),
