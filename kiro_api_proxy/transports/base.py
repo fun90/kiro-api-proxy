@@ -69,10 +69,14 @@ class TransportError(RuntimeError):
         message: str,
         category: ErrorCategory = ErrorCategory.UPSTREAM,
         retryable: bool = False,
+        connect_error: bool = False,
     ) -> None:
         super().__init__(message)
         self.category = category
         self.retryable = retryable
+        # connect_error 表示错误发生在建连阶段、尚未向上游发出任何字节，
+        # 因此可安全无副作用地重放一次（用于自愈空闲后失效的 keepalive 连接）。
+        self.connect_error = connect_error
 
 
 class KiroTransport(Protocol):

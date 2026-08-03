@@ -401,6 +401,15 @@ async def _events(
                     event = next_event.result()
                 except StopAsyncIteration:
                     break
+                except TransportError as exc:
+                    # 传输层错误（含空闲后连接池死连接的 ConnectError）转成
+                    # 干净的 SSE ERROR 事件，避免穿透到 StreamingResponse 变 500。
+                    yield GenerationEvent(
+                        EventType.ERROR,
+                        text=str(exc),
+                        data={"category": exc.category.value},
+                    )
+                    return
                 finally:
                     next_event = None
                 if (

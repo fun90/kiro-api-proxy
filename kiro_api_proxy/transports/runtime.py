@@ -241,10 +241,15 @@ class RuntimeTransport:
                 "Runtime 传输未初始化", ErrorCategory.PROTOCOL
             )
 
+        yielded = False
         try:
             async for event in self._do_stream(request):
+                yielded = True
                 yield event
         except TransportError as exc:
+            # 已向下游产出内容后不能重放，否则会重复输出。
+            if yielded:
+                raise
             # 首次 401：刷新 Token 后重放一次
             if exc.category is ErrorCategory.AUTHENTICATION and exc.retryable:
                 logger.info("Runtime 401，尝试刷新 Token 后重放")
@@ -257,6 +262,12 @@ class RuntimeTransport:
                         retryable=False,
                     ) from refresh_exc
                 # 重放一次，不再捕获 401
+                async for event in self._do_stream(request):
+                    yield event
+            # 建连失败（典型为空闲后连接池里的 keepalive 死连接）：
+            # 尚未产出任何内容，直接重放一次让 httpx 建立新连接。
+            elif exc.connect_error:
+                logger.info("Runtime 建连失败，重放一次以建立新连接")
                 async for event in self._do_stream(request):
                     yield event
             else:
@@ -366,6 +377,15 @@ class RuntimeTransport:
 
         except TransportError:
             raise
+        except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+            # 建连阶段失败：尚未向上游发出任何字节，可安全无副作用重放。
+            # 典型场景是空闲后连接池里的 keepalive 连接已被悄悄关闭。
+            raise TransportError(
+                f"Runtime 建连失败: {type(exc).__name__}",
+                ErrorCategory.UPSTREAM,
+                retryable=True,
+                connect_error=True,
+            ) from exc
         except httpx.HTTPError as exc:
             raise TransportError(
                 f"Runtime 流式请求网络错误: {type(exc).__name__}",

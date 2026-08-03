@@ -14,6 +14,7 @@ from kiro_api_proxy.event_stream import _crc32c
 from kiro_api_proxy.transports.base import (
     EventType,
     GenerationRequest,
+    TransportError,
 )
 from kiro_api_proxy.transports.runtime import (
     RuntimeTransport,
@@ -314,6 +315,99 @@ class TestRuntime401Replay:
         rt._token_provider.force_refresh.assert_called_once()
         texts = [e.text for e in events if e.type is EventType.TEXT_DELTA]
         assert texts == ["OK"]
+
+
+# ============================================================
+# 测试：建连失败重放（空闲后连接池死连接自愈）
+# ============================================================
+
+
+class TestRuntimeConnectRetry:
+    async def test_connect_error_then_success(self):
+        """建连阶段 ConnectError（典型为空闲后 keepalive 死连接）应重放一次。"""
+        rt = _make_runtime_transport()
+        frames = _text_frame("OK") + _done_frame()
+
+        mock_resp_200 = AsyncMock()
+        mock_resp_200.status_code = 200
+        mock_resp_200.aiter_bytes = lambda: _async_iter([frames])
+
+        call_count = 0
+
+        class ConnCtx:
+            async def __aenter__(self):
+                raise httpx.ConnectError("connection reset")
+
+            async def __aexit__(self, *args):
+                return False
+
+        class StreamCtx:
+            def __init__(self, resp):
+                self.resp = resp
+
+            async def __aenter__(self):
+                return self.resp
+
+            async def __aexit__(self, *args):
+                return False
+
+        def stream_side_effect(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return ConnCtx()
+            return StreamCtx(mock_resp_200)
+
+        with patch.object(rt._client, "stream", side_effect=stream_side_effect):
+            events = [
+                e async for e in rt.stream(GenerationRequest("auto", "hi"))
+            ]
+
+        # 重放一次后成功，且不触发 Token 刷新。
+        assert call_count == 2
+        rt._token_provider.force_refresh.assert_not_called()
+        texts = [e.text for e in events if e.type is EventType.TEXT_DELTA]
+        assert texts == ["OK"]
+
+    async def test_connect_error_not_replayed_after_output(self):
+        """已向下游产出内容后再发生连接错误不重放，避免重复输出。"""
+        rt = _make_runtime_transport()
+
+        async def _iter_then_error(frames):
+            yield frames
+            raise httpx.ConnectError("mid-stream drop")
+
+        mock_resp = AsyncMock()
+        mock_resp.status_code = 200
+        mock_resp.aiter_bytes = lambda: _iter_then_error(_text_frame("partial"))
+
+        call_count = 0
+
+        class StreamCtx:
+            def __init__(self, resp):
+                self.resp = resp
+
+            async def __aenter__(self):
+                return self.resp
+
+            async def __aexit__(self, *args):
+                return False
+
+        def stream_side_effect(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            return StreamCtx(mock_resp)
+
+        events = []
+        with patch.object(rt._client, "stream", side_effect=stream_side_effect):
+            with pytest.raises(TransportError):
+                async for e in rt.stream(GenerationRequest("auto", "hi")):
+                    events.append(e)
+
+        # 未重放，且已产出的文本仍送达。
+        assert call_count == 1
+        texts = [e.text for e in events if e.type is EventType.TEXT_DELTA]
+        assert texts == ["partial"]
 
 
 # ============================================================
