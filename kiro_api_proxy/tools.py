@@ -140,6 +140,24 @@ def _block_text(content: Any) -> str:
     )
 
 
+def _alternates(history: list[dict[str, Any]]) -> bool:
+    """校验 history 以 userInputMessage 开头并严格交替。
+
+    Runtime 不接受连续同角色的历史消息（客户端可能在一轮里追加多条 user
+    消息，例如注入提醒或中断提示），不满足时调用方应放弃结构化历史。
+    """
+    expected = "userInputMessage"
+    for item in history:
+        if expected not in item:
+            return False
+        expected = (
+            "assistantResponseMessage"
+            if expected == "userInputMessage"
+            else "userInputMessage"
+        )
+    return True
+
+
 def _anthropic_tool_uses(content: Any) -> list[dict[str, Any]]:
     if not isinstance(content, list):
         return []
@@ -192,8 +210,10 @@ def anthropic_tool_history(
             if pending_tool_ids:
                 return []
             tool_uses = _anthropic_tool_uses(message.content)
+            # 只发工具调用、没有前置文本的 assistant 消息很常见，Runtime 拒收
+            # 空 content，与 user 侧一样补占位符。
             payload = {
-                "content": _block_text(message.content),
+                "content": _block_text(message.content) or ".",
             }
             if tool_uses:
                 payload["toolUses"] = tool_uses
@@ -203,6 +223,8 @@ def anthropic_tool_history(
             history.append({"assistantResponseMessage": payload})
 
     if pending_tool_ids != current_result_ids:
+        return []
+    if not _alternates(history):
         return []
     return history
 
@@ -262,8 +284,9 @@ def openai_tool_history(messages: list[Message]) -> list[dict[str, Any]]:
             if pending_tool_ids:
                 return []
             tool_uses = _openai_tool_uses(message)
+            # 同 Anthropic 侧：只带 tool_calls 的 assistant 消息 content 为空。
             payload: dict[str, Any] = {
-                "content": _block_text(message.content),
+                "content": _block_text(message.content) or ".",
             }
             if tool_uses:
                 payload["toolUses"] = tool_uses
@@ -308,6 +331,8 @@ def openai_tool_history(messages: list[Message]) -> list[dict[str, Any]]:
         index += 1
 
     if pending_tool_ids != current_result_ids:
+        return []
+    if not _alternates(history):
         return []
     return history
 
