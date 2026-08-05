@@ -466,6 +466,67 @@ class TestRuntimeStreamNoUsage:
 
 
 # ============================================================
+# 测试：4xx 携带上游返回的被拒原因
+# ============================================================
+
+
+class TestRuntimeErrorDetail:
+    async def test_400_includes_upstream_message(self):
+        """400 的 body 写明被拒原因，必须带进错误信息用于定位。"""
+        rt = _make_runtime_transport()
+
+        mock_resp = AsyncMock()
+        mock_resp.status_code = 400
+        mock_resp.aread = AsyncMock(
+            return_value=json.dumps(
+                {
+                    "__type": "ValidationException",
+                    "message": "history[1].assistantResponseMessage.content "
+                    "must not be empty",
+                }
+            ).encode()
+        )
+
+        with patch.object(rt._client, "stream") as mock_stream:
+            mock_stream.return_value = _async_context(mock_resp)
+            with pytest.raises(TransportError) as excinfo:
+                [e async for e in rt.stream(GenerationRequest("auto", "hi"))]
+
+        message = str(excinfo.value)
+        assert "HTTP 400" in message
+        assert "must not be empty" in message
+
+    async def test_400_with_non_json_body_falls_back_to_raw_text(self):
+        rt = _make_runtime_transport()
+
+        mock_resp = AsyncMock()
+        mock_resp.status_code = 400
+        mock_resp.aread = AsyncMock(return_value=b"Bad Request: malformed history")
+
+        with patch.object(rt._client, "stream") as mock_stream:
+            mock_stream.return_value = _async_context(mock_resp)
+            with pytest.raises(TransportError) as excinfo:
+                [e async for e in rt.stream(GenerationRequest("auto", "hi"))]
+
+        assert "malformed history" in str(excinfo.value)
+
+    async def test_400_with_empty_body_keeps_status_only(self):
+        """body 为空时不能拼出尾随冒号。"""
+        rt = _make_runtime_transport()
+
+        mock_resp = AsyncMock()
+        mock_resp.status_code = 400
+        mock_resp.aread = AsyncMock(return_value=b"")
+
+        with patch.object(rt._client, "stream") as mock_stream:
+            mock_stream.return_value = _async_context(mock_resp)
+            with pytest.raises(TransportError) as excinfo:
+                [e async for e in rt.stream(GenerationRequest("auto", "hi"))]
+
+        assert str(excinfo.value) == "Runtime 请求错误: HTTP 400"
+
+
+# ============================================================
 # 异步辅助
 # ============================================================
 

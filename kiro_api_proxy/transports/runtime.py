@@ -54,6 +54,38 @@ def _context_window_tokens(model: dict[str, Any]) -> int | None:
     return None
 
 
+_ERROR_DETAIL_LIMIT = 500
+
+
+async def _error_detail(resp: httpx.Response) -> str:
+    """读取错误响应体，提取上游给出的被拒原因。
+
+    流式响应必须显式 aread() 才能拿到 body。CodeWhisperer 的 4xx 通常是
+    JSON，`message`/`reason` 字段写明哪个字段不合法；解析失败则回退原文。
+    """
+    try:
+        raw = await resp.aread()
+    except httpx.HTTPError:
+        return ""
+    text = raw.decode("utf-8", errors="replace").strip()
+    if not text:
+        return ""
+    try:
+        payload = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        return text[:_ERROR_DETAIL_LIMIT]
+    if isinstance(payload, dict):
+        for key in ("message", "Message", "reason", "errorMessage", "__type"):
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()[:_ERROR_DETAIL_LIMIT]
+    return text[:_ERROR_DETAIL_LIMIT]
+
+
+def _detail_suffix(detail: str) -> str:
+    return f": {detail}" if detail else ""
+
+
 KIRO_VERSION = "0.11.107"
 
 
@@ -347,8 +379,11 @@ class RuntimeTransport:
                         retryable=True,
                     )
                 if resp.status_code >= 400:
+                    # 4xx 通常在 body 里写明被拒原因（哪个字段不合法），
+                    # 只报状态码会丢掉唯一的诊断线索。
                     raise TransportError(
-                        f"Runtime 请求错误: HTTP {resp.status_code}",
+                        f"Runtime 请求错误: HTTP {resp.status_code}"
+                        f"{_detail_suffix(await _error_detail(resp))}",
                         ErrorCategory.UPSTREAM,
                         retryable=False,
                     )
