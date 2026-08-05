@@ -409,6 +409,34 @@ class TestRuntimeConnectRetry:
         texts = [e.text for e in events if e.type is EventType.TEXT_DELTA]
         assert texts == ["partial"]
 
+    async def test_ssl_error_mid_stream_becomes_transport_error(self):
+        """流式读取中途的裸 OSError（如 ssl.SSLError）应转为 TransportError。
+
+        ssl.SSLError 不是 httpx.HTTPError 的子类，若不显式捕获会直接穿透
+        StreamingResponse 导致 ASGI 500，而不是转成干净的 SSE ERROR 事件。
+        """
+        rt = _make_runtime_transport()
+
+        async def _iter_then_ssl_error(frames):
+            yield frames
+            import ssl
+
+            raise ssl.SSLError("record layer failure")
+
+        mock_resp = AsyncMock()
+        mock_resp.status_code = 200
+        mock_resp.aiter_bytes = lambda: _iter_then_ssl_error(_text_frame("partial"))
+
+        with patch.object(rt._client, "stream") as mock_stream:
+            mock_stream.return_value = _async_context(mock_resp)
+            events = []
+            with pytest.raises(TransportError):
+                async for e in rt.stream(GenerationRequest("auto", "hi")):
+                    events.append(e)
+
+        texts = [e.text for e in events if e.type is EventType.TEXT_DELTA]
+        assert texts == ["partial"]
+
 
 # ============================================================
 # 测试：流后失败（已输出内容后出错）

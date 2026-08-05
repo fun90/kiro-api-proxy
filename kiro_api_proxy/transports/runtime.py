@@ -217,7 +217,7 @@ class RuntimeTransport:
                 },
                 headers=self._headers(token, runtime=True),
             )
-        except httpx.HTTPError as exc:
+        except (httpx.HTTPError, OSError) as exc:
             raise TransportError(
                 f"Runtime 模型发现网络错误: {type(exc).__name__}",
                 ErrorCategory.UPSTREAM,
@@ -421,7 +421,10 @@ class RuntimeTransport:
                 retryable=True,
                 connect_error=True,
             ) from exc
-        except httpx.HTTPError as exc:
+        except (httpx.HTTPError, OSError) as exc:
+            # OSError 覆盖 ssl.SSLError 等裸底层异常（非 httpx.HTTPError 子类），
+            # 流式读取中途 TLS 记录层失败会直接抛出这类异常，不转换会击穿
+            # StreamingResponse 导致 ASGI 500。
             raise TransportError(
                 f"Runtime 流式请求网络错误: {type(exc).__name__}",
                 ErrorCategory.UPSTREAM,
