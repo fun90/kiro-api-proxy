@@ -133,6 +133,87 @@ async def test_responses(monkeypatch):
     assert body["usage"]["output_tokens"] == 1
 
 
+async def test_responses_forwards_function_tool_roundtrip(monkeypatch):
+    async def fake_events(
+        model,
+        prompt,
+        effort=None,
+        client_request=None,
+        session_id=None,
+        tools=None,
+        tool_results=None,
+        history=None,
+    ):
+        spec = tools[0]["toolSpecification"]
+        assert spec["name"] == "shell"
+        assert spec["inputSchema"]["json"]["required"] == ["command"]
+        assert [result["toolUseId"] for result in tool_results] == [
+            "call_1",
+            "call_2",
+        ]
+        assert tool_results[1]["status"] == "error"
+        assert [
+            call["toolUseId"]
+            for call in history[-1]["assistantResponseMessage"]["toolUses"]
+        ] == ["call_1", "call_2"]
+        yield GenerationEvent(EventType.TEXT_DELTA, text="已处理")
+        yield GenerationEvent(EventType.DONE)
+
+    monkeypatch.setattr(main, "_events", fake_events)
+    async with AsyncClient(
+        transport=ASGITransport(app=main.app), base_url="http://test"
+    ) as client:
+        response = await client.post(
+            "/v1/responses",
+            json={
+                "model": "auto",
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "shell",
+                        "description": "执行命令",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "command": {"type": "string"},
+                            },
+                            "required": ["command"],
+                        },
+                    }
+                ],
+                "input": [
+                    {"role": "user", "content": "检查环境"},
+                    {
+                        "type": "function_call",
+                        "call_id": "call_1",
+                        "name": "shell",
+                        "arguments": '{"command":"node --version"}',
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "call_2",
+                        "name": "shell",
+                        "arguments": '{"command":"npm --version"}',
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_1",
+                        "output": "v22.23.0",
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_2",
+                        "output": "command failed",
+                        "status": "failed",
+                    },
+                ],
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["output_text"] == "已处理"
+
+
 async def test_anthropic_messages(monkeypatch):
     async def fake_events(
         model,

@@ -68,6 +68,26 @@ class TestOpenAIToolsToSpecs:
     def test_skips_non_function_type(self):
         assert openai_tools_to_specs([{"type": "retrieval"}]) == []
 
+    def test_converts_responses_flat_function(self):
+        specs = openai_tools_to_specs(
+            [
+                {
+                    "type": "function",
+                    "name": "shell",
+                    "description": "执行命令",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"command": {"type": "string"}},
+                        "required": ["command"],
+                    },
+                }
+            ]
+        )
+
+        spec = specs[0]["toolSpecification"]
+        assert spec["name"] == "shell"
+        assert spec["inputSchema"]["json"]["required"] == ["command"]
+
 
 class TestAnthropicToolResults:
     def test_extracts_from_last_user_message(self):
@@ -259,6 +279,29 @@ class TestOpenAIToolResults:
             Message(role="user", content="new question"),
         ]
         assert openai_tool_results(messages) == []
+
+    def test_preserves_explicit_error_status(self):
+        messages = [
+            Message(
+                role="tool",
+                content="command failed",
+                tool_call_id="call_1",
+                status="failed",
+            )
+        ]
+
+        assert openai_tool_results(messages)[0]["status"] == "error"
+
+    def test_does_not_guess_error_from_output_text(self):
+        messages = [
+            Message(
+                role="tool",
+                content="ls: cannot access '/usr/bin/node': No such file or directory",
+                tool_call_id="call_1",
+            )
+        ]
+
+        assert openai_tool_results(messages)[0]["status"] == "success"
 
     def test_builds_matching_active_tool_history(self):
         messages = [

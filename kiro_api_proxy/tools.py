@@ -47,14 +47,15 @@ def anthropic_tools_to_specs(
 def openai_tools_to_specs(
     tools: list[dict[str, Any]] | None,
 ) -> list[dict[str, Any]]:
-    """OpenAI `tools`（function）→ Kiro toolSpecification 列表。"""
+    """OpenAI Chat/Responses `tools` → Kiro toolSpecification 列表。"""
     specs: list[dict[str, Any]] = []
     for tool in tools or []:
         if not isinstance(tool, dict):
             continue
         if tool.get("type") not in (None, "function"):
             continue
-        function = tool.get("function") or {}
+        # Chat Completions 将定义放在 function 下，Responses API 使用扁平结构。
+        function = tool.get("function") or tool
         name = function.get("name")
         if not name:
             continue
@@ -66,6 +67,13 @@ def openai_tools_to_specs(
             )
         )
     return specs
+
+
+def _openai_result_status(message: Message) -> str:
+    extra = message.model_extra or {}
+    status = str(extra.get("status", "")).lower()
+    failed_statuses = {"error", "failed", "failure", "cancelled", "incomplete"}
+    return "error" if extra.get("is_error") is True or status in failed_statuses else "success"
 
 
 def _result_content(content: Any) -> list[dict[str, Any]]:
@@ -222,7 +230,7 @@ def openai_tool_results(messages: list[Message]) -> list[dict[str, Any]]:
                     {
                         "toolUseId": tool_call_id,
                         "content": _result_content(message.content),
-                        "status": "success",
+                        "status": _openai_result_status(message),
                     }
                 )
         else:
@@ -285,7 +293,7 @@ def openai_tool_history(messages: list[Message]) -> list[dict[str, Any]]:
                             "content": _result_content(
                                 tool_message.content
                             ),
-                            "status": "success",
+                            "status": _openai_result_status(tool_message),
                         }
                     )
                 index += 1

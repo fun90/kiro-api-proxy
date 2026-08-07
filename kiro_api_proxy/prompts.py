@@ -126,11 +126,65 @@ def responses_to_messages(request: ResponsesRequest) -> list[Message]:
         messages.append(Message(role="user", content=request.input))
         return messages
     valid_roles = {"system", "developer", "user", "assistant", "tool"}
+    pending_calls: list[dict[str, Any]] = []
+
+    def flush_calls() -> None:
+        if not pending_calls:
+            return
+        messages.append(
+            Message(role="assistant", content="", tool_calls=list(pending_calls))
+        )
+        pending_calls.clear()
+
     for item in request.input:
+        item_type = item.get("type")
+        if item_type == "function_call":
+            call_id = item.get("call_id") or item.get("id")
+            if not call_id or not item.get("name"):
+                continue
+            arguments = item.get("arguments", "{}")
+            if not isinstance(arguments, str):
+                arguments = json.dumps(arguments, ensure_ascii=False)
+            pending_calls.append(
+                {
+                    "id": call_id,
+                    "type": "function",
+                    "function": {
+                        "name": item["name"],
+                        "arguments": arguments,
+                    },
+                }
+            )
+            continue
+
+        flush_calls()
+        if item_type == "function_call_output":
+            call_id = item.get("call_id")
+            if not call_id:
+                continue
+            output = item.get("output", "")
+            if isinstance(output, dict):
+                output = [{"json": output}]
+            elif not isinstance(output, (str, list)):
+                output = str(output)
+            messages.append(
+                Message(
+                    role="tool",
+                    content=output,
+                    tool_call_id=call_id,
+                    status=item.get("status"),
+                    is_error=item.get("is_error"),
+                )
+            )
+            continue
+
+        if item_type not in (None, "message"):
+            continue
         role = item.get("role", "user")
         if role not in valid_roles:
             role = "user"
         messages.append(Message(role=role, content=item.get("content", "")))
+    flush_calls()
     return messages
 
 

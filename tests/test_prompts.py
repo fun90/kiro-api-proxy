@@ -10,8 +10,9 @@ from kiro_api_proxy.prompts import (
     content_text,
     messages_to_prompt,
     prompt_working_directory,
+    responses_to_messages,
 )
-from kiro_api_proxy.schemas import Message
+from kiro_api_proxy.schemas import Message, ResponsesRequest
 
 
 def test_content_text_excludes_structured_tool_blocks():
@@ -72,6 +73,51 @@ def test_messages_to_prompt_does_not_leak_tool_protocol_into_text():
     assert "工具执行结果" not in prompt
     assert prompt.count("### 用户\n") == 1
     assert prompt.endswith("### 助手\n")
+
+
+def test_responses_to_messages_converts_parallel_function_roundtrip():
+    request = ResponsesRequest(
+        model="auto",
+        input=[
+            {"role": "user", "content": "检查两个命令"},
+            {
+                "type": "function_call",
+                "call_id": "call_1",
+                "name": "shell",
+                "arguments": '{"command":"node --version"}',
+            },
+            {
+                "type": "function_call",
+                "call_id": "call_2",
+                "name": "shell",
+                "arguments": {"command": "npm --version"},
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call_1",
+                "output": "v22.23.0",
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call_2",
+                "output": "10.9.2",
+                "status": "failed",
+            },
+        ],
+    )
+
+    messages = responses_to_messages(request)
+
+    assert [message.role for message in messages] == [
+        "user",
+        "assistant",
+        "tool",
+        "tool",
+    ]
+    calls = messages[1].model_extra["tool_calls"]
+    assert [call["id"] for call in calls] == ["call_1", "call_2"]
+    assert calls[1]["function"]["arguments"] == '{"command": "npm --version"}'
+    assert messages[3].model_extra["status"] == "failed"
 
 
 def test_prompt_working_directory_accepts_project_under_configured_root(
